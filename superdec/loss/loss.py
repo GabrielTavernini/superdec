@@ -156,7 +156,7 @@ class Loss(nn.Module):
         prim_to_pcl_loss = (prim_to_pcl * exist.squeeze(-1)).sum(dim=-1)
         prim_to_pcl_loss = (prim_to_pcl_loss / (exist.squeeze(-1).sum(dim=-1) + 1e-6)).mean()
 
-        return pcl_to_prim_loss, pcl_to_prim_loss
+        return pcl_to_prim_loss, prim_to_pcl_loss
     
     def compute_existence_loss(self, assign_matrix, exist):
         thred = 24
