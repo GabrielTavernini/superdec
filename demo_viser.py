@@ -67,6 +67,7 @@ def main():
     pred_handler = PredictionHandler.from_outdict(outdict, points, ['chair'])
     mesh = pred_handler.get_meshes(resolution=resolution)[0]
     pcs = pred_handler.get_segmented_pcs()[0]
+    pred_handler.save_npz("test.npz")
 
     server = viser.ViserServer()
     server.scene.add_mesh_trimesh("superquadrics", mesh=mesh, visible=True)

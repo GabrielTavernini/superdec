@@ -1,0 +1,3 @@
+[submodule "scannetpp"]
+	path = scannetpp
+	url = https://github.com/scannetpp/scannetpp
