@@ -78,9 +78,9 @@ class Config:
     port: int = 8080
 
     # Batch size for training. Learning rates are scaled automatically
-    batch_size: int = 1
+    batch_size: int = 10
     # A global factor to scale the number of training steps
-    steps_scaler: float = 1.0
+    steps_scaler: float = 0.1
 
     # Number of training steps
     max_steps: int = 30_000
@@ -130,7 +130,7 @@ class Config:
     bkgd_color: List[float] = field(default_factory=lambda: [255.0, 255.0, 255.0])
 
     # LR for 3D point positions
-    means_lr: float = 1.6e-4
+    means_lr: float = 1.6e-3#1.6e-4
     # LR for Gaussian scale factors
     scales_lr: float = 5e-3
     # LR for alpha blending weights
@@ -339,6 +339,10 @@ class Runner:
         self.valset = Dataset(self.parser, split="val")
         self.scene_scale = self.parser.scene_scale * 1.1 * cfg.global_scale
         print("Scene scale:", self.scene_scale)
+        
+        self.backgrounds = None
+        if cfg.bkgd_color:
+            self.backgrounds = torch.tensor([cfg.bkgd_color], device=self.device)/ 255.0
 
         # Model
         feature_dim = 32 if cfg.app_opt else None
@@ -565,10 +569,10 @@ class Runner:
         init_step = 0
 
         schedulers = [
-            # means has a learning rate schedule, that end at 0.01 of the initial value
-            # torch.optim.lr_scheduler.ExponentialLR(
-            #     self.optimizers["means"], gamma=0.01 ** (1.0 / max_steps)
-            # ),
+            # superq has a learning rate schedule, that end at 0.01 of the initial value
+            torch.optim.lr_scheduler.ExponentialLR(
+                self.superq_optimizer, gamma=0.01 ** (1.0 / max_steps)
+            ),
         ]
         if cfg.pose_opt:
             # pose optimization has a learning rate schedule
@@ -656,7 +660,7 @@ class Runner:
                 image_ids=image_ids,
                 render_mode="RGB+ED" if cfg.depth_loss else "RGB",
                 masks=masks,
-                backgrounds=torch.tensor([cfg.bkgd_color], device=self.device)/ 255.0,
+                backgrounds=self.backgrounds.repeat(camtoworlds.shape[0], 1),
             )
             if renders.shape[-1] == 4:
                 colors, depths = renders[..., 0:3], renders[..., 3:4]
@@ -939,7 +943,7 @@ class Runner:
                 near_plane=cfg.near_plane,
                 far_plane=cfg.far_plane,
                 masks=masks,
-                backgrounds=torch.tensor([cfg.bkgd_color], device=self.device)/ 255.0,
+                backgrounds=self.backgrounds.repeat(camtoworlds.shape[0], 1),
             )  # [1, H, W, 3]
             torch.cuda.synchronize()
             ellipse_time += max(time.time() - tic, 1e-10)
@@ -1060,7 +1064,7 @@ class Runner:
                 near_plane=cfg.near_plane,
                 far_plane=cfg.far_plane,
                 render_mode="RGB+ED",
-                backgrounds=torch.tensor([cfg.bkgd_color], device=self.device)/ 255.0,
+                backgrounds=self.backgrounds.repeat(camtoworlds.shape[0], 1),
             )  # [1, H, W, 4]
             colors = torch.clamp(renders[..., 0:3], 0.0, 1.0)  # [1, H, W, 3]
             depths = renders[..., 3:4]  # [1, H, W, 1]
