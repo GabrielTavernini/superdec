@@ -38,29 +38,46 @@ class SuperQ(nn.Module):
             pred_handler.scale.astype(np.float32),
             pred_handler.exponents.astype(np.float32)
         )
-        etas = etas.reshape(-1, num_pts_per_sq)[self.mask]
-        omegas = omegas.reshape(-1, num_pts_per_sq)[self.mask]
+        etas = etas.reshape(-1, num_pts_per_sq)[self.mask].reshape(-1)
+        omegas = omegas.reshape(-1, num_pts_per_sq)[self.mask].reshape(-1)
 
         # Make sure we don't get nan for gradients
         etas[etas == 0] += 1e-6
         omegas[omegas == 0] += 1e-6
 
-
-        self.etas = torch.tensor(etas, device=device)
-        self.omegas = torch.tensor(omegas, device=device)
+        # etas and betas need to be in the state_dict to allow loading from checkpoint
+        self.register_buffer("etas", torch.tensor(etas, device=device))
+        self.register_buffer("omegas", torch.tensor(omegas, device=device))
+        # sq_idx tells us which Superquadric each point belongs to.
+        self.register_buffer("sq_idx", torch.arange(S, device=device).repeat_interleave(num_pts_per_sq))
         self.offsets = torch.rand(Ng, 3, device=device)
-        self.is_prune = torch.zeros(etas.shape, dtype=torch.bool, device=device)
 
         # Turn selected attributes into trainable parameters
         for name in trainable:
             val = getattr(self, name)
             setattr(self, name, nn.Parameter(val))
 
+    def load_dynamic_checkpoint(self, state_dict):
+        if "offsets" not in state_dict:
+            raise RuntimeError("Checkpoint missing 'offsets' key.")
+            
+        saved_Ng = state_dict["offsets"].shape[0]
+        current_Ng = self.offsets.shape[0]
+
+        print(f"Resizing model from {current_Ng} points to {saved_Ng} points to match checkpoint.")
+
+        self.offsets = nn.Parameter(torch.zeros(saved_Ng, 3, device=self.offsets.device))
+        self.sq_idx = torch.zeros(saved_Ng, dtype=torch.long, device=self.sq_idx.device)
+        self.etas = torch.zeros(saved_Ng, device=self.etas.device)
+        self.omegas = torch.zeros(saved_Ng, device=self.omegas.device)
+        
+        self.load_state_dict(state_dict, strict=True)
+
     def prune_gs(self, is_prune):
-        tmp = self.is_prune.reshape(-1)
-        sel = torch.where(~tmp)
-        tmp[sel] |= is_prune
-        self.is_prune |= tmp.reshape(self.etas.shape)
+        # offsets are pruned in the strat
+        self.etas = self.etas[~is_prune]
+        self.omegas = self.omegas[~is_prune]
+        self.sq_idx = self.sq_idx[~is_prune]
 
     def update_handler(self):
         batch_size = self.pred_handler.scale.shape[1]
@@ -77,33 +94,37 @@ class SuperQ(nn.Module):
 
     def forward(self):
         # Make sure that all tensors have the right shape
-        a1 = self.sqscale[:, 0].unsqueeze(-1) # Sx1
-        a2 = self.sqscale[:, 1].unsqueeze(-1) # Sx1
-        a3 = self.sqscale[:, 2].unsqueeze(-1) # Sx1
-        e1 = self.exponents[:, 0].unsqueeze(-1) # Sx1
-        e2 = self.exponents[:, 1].unsqueeze(-1) # Sx1
+        current_scale = self.sqscale[self.sq_idx]       # [Ng, 3]
+        current_exps = self.exponents[self.sq_idx]      # [Ng, 2]
+        current_rot = self.rotation[self.sq_idx]        # [Ng, 3, 3]
+        current_trans = self.translation[self.sq_idx]   # [Ng, 3]
 
-        x = a1 * self.fexp(torch.cos(self.etas), e1) * self.fexp(torch.cos(self.omegas), e2)
-        y = a2 * self.fexp(torch.cos(self.etas), e1) * self.fexp(torch.sin(self.omegas), e2)
-        z = a3 * self.fexp(torch.sin(self.etas), e1)
+        # 2. Calculate Local Geometry
+        a1, a2, a3 = current_scale[:, 0], current_scale[:, 1], current_scale[:, 2]
+        e1, e2 = current_exps[:, 0], current_exps[:, 1]
+
+        cos_eta, sin_eta = torch.cos(self.etas), torch.sin(self.etas)
+        cos_omega, sin_omega = torch.cos(self.omegas), torch.sin(self.omegas)
+
+        t1 = self.fexp(cos_eta, e1)
+        t2 = self.fexp(sin_eta, e1)
         
+        x = a1 * t1 * self.fexp(cos_omega, e2)
+        y = a2 * t1 * self.fexp(sin_omega, e2)
+        z = a3 * t2
+        
+        # Fix numerical instability at 0
         x = ((x > 0).float() * 2 - 1) * torch.max(torch.abs(x), x.new_tensor(1e-6))
         y = ((y > 0).float() * 2 - 1) * torch.max(torch.abs(y), x.new_tensor(1e-6))
         z = ((z > 0).float() * 2 - 1) * torch.max(torch.abs(z), x.new_tensor(1e-6))
-        pos = torch.stack([x, y, z], -1)
+        local_pos = torch.stack([x, y, z], dim=-1)
 
-        global_pos = []
-        for s in range(self.sqscale.shape[0]):
-            p = pos[s] @ self.rotation[s].T
-            p += self.translation[s]
-            global_pos.append(p)
-        global_pos = torch.stack(global_pos, dim=0)
-        global_pos = global_pos.reshape(-1, 3)
+        rotated_pos = torch.bmm(current_rot, local_pos.unsqueeze(-1)).squeeze(-1)        
+        global_pos = rotated_pos + current_trans
 
         if self.negative_offset:
-            global_pos += torch.tanh(self.offsets) * self.max_offset
+            offset_val = torch.tanh(self.offsets) * self.max_offset
         else:
-            global_pos += torch.sigmoid(self.offsets) * self.max_offset
-        
-        global_pos = global_pos[~self.is_prune.reshape(-1)]
+            offset_val = torch.sigmoid(self.offsets) * self.max_offset        
+        global_pos += offset_val
         return global_pos

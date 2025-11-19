@@ -94,7 +94,7 @@ class Config:
     # Steps to save the model as ply
     ply_steps: List[int] = field(default_factory=lambda: [7_000, 30_000])
     # Whether to disable video generation during training and evaluation
-    disable_video: bool = True
+    disable_video: bool = False
 
     # Degree of spherical harmonics
     sh_degree: int = 3
@@ -287,13 +287,15 @@ def create_splats_with_optimizers(
         )
         for name, _, lr in params
     }
-    superq_optimizer = optimizer_class(
-        [{"params": superq.named_parameters(), "lr": means_lr * scene_scale * math.sqrt(BS), "name": "superq"}],
-        eps=1e-15 / math.sqrt(BS),
-        # TODO: check betas logic when BS is larger than 10 betas[0] will be zero.
-        betas=(1 - BS * (1 - 0.9), 1 - BS * (1 - 0.999)),
-    )
-    return splats, optimizers, superq, superq_optimizer
+    superq_optimizers = {
+        name: optimizer_class(
+            [{"params": param, "lr": means_lr * scene_scale * math.sqrt(BS), "name": "superq"}],
+            eps=1e-15 / math.sqrt(BS),
+            # TODO: check betas logic when BS is larger than 10 betas[0] will be zero.
+            betas=(1 - BS * (1 - 0.9), 1 - BS * (1 - 0.999)),
+        ) for name, param in superq.named_parameters()
+    }
+    return splats, optimizers, superq, superq_optimizers
 
 
 class Runner:
@@ -349,7 +351,7 @@ class Runner:
 
         # Model
         feature_dim = 32 if cfg.app_opt else None
-        self.splats, self.optimizers, self.superq, self.superq_optimizer = create_splats_with_optimizers(
+        self.splats, self.optimizers, self.superq, self.superq_optimizers = create_splats_with_optimizers(
             self.parser,
             self.pred_handler,
             num_pts_per_sq=cfg.num_pts_per_sq,
@@ -574,8 +576,8 @@ class Runner:
         schedulers = [
             # superq has a learning rate schedule, that end at 0.01 of the initial value
             torch.optim.lr_scheduler.ExponentialLR(
-                self.superq_optimizer, gamma=0.01 ** (1.0 / max_steps)
-            ),
+                optimizer, gamma=0.01 ** (1.0 / max_steps)
+            ) for optimizer in self.superq_optimizers.values()
         ]
         if cfg.pose_opt:
             # pose optimization has a learning rate schedule
@@ -872,8 +874,9 @@ class Runner:
                 else:
                     optimizer.step()
                 optimizer.zero_grad(set_to_none=True)
-            self.superq_optimizer.step()
-            self.superq_optimizer.zero_grad(set_to_none=True)
+            for optimizer in self.superq_optimizers.values():
+                optimizer.step()
+                optimizer.zero_grad(set_to_none=True)
             for optimizer in self.pose_optimizers:
                 optimizer.step()
                 optimizer.zero_grad(set_to_none=True)
@@ -891,6 +894,7 @@ class Runner:
                 params=self.splats,
                 optimizers=self.optimizers,
                 superq=self.superq,
+                superq_optimizers=self.superq_optimizers,
                 state=self.strategy_state,
                 step=step,
                 info=info,
@@ -1193,7 +1197,7 @@ def main(local_rank: int, world_rank, world_size: int, cfg: Config):
         ]
         for k in runner.splats.keys():
             runner.splats[k].data = torch.cat([ckpt["splats"][k] for ckpt in ckpts])
-        runner.superq.load_state_dict(ckpts[0]["superq"])
+        runner.superq.load_dynamic_checkpoint(ckpts[0]["superq"])
         step = ckpts[0]["step"]
         runner.eval(step=step)
         runner.render_traj(step=step)

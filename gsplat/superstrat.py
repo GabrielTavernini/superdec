@@ -1,7 +1,8 @@
 from dataclasses import dataclass
-from typing import Any, Dict, Tuple, Union
+from typing import Any, Dict, Tuple, Union, Callable, List
 
 import torch
+from torch import Tensor
 from typing_extensions import Literal
 
 from gsplat.strategy.base import Strategy
@@ -76,7 +77,7 @@ class SuperStrategy(Strategy):
 
     """
 
-    enable_prune: bool = False
+    enable_prune: bool = True
     prune_opa: float = 0.005
     grow_grad2d: float = 0.0002
     grow_scale3d: float = 0.01
@@ -155,6 +156,7 @@ class SuperStrategy(Strategy):
         params: Union[Dict[str, torch.nn.Parameter], torch.nn.ParameterDict],
         optimizers: Dict[str, torch.optim.Optimizer],
         superq: SuperQ,
+        superq_optimizers: Dict[str, torch.optim.Optimizer],
         state: Dict[str, Any],
         step: int,
         info: Dict[str, Any],
@@ -181,7 +183,7 @@ class SuperStrategy(Strategy):
 
             # prune GSs
             if self.enable_prune:
-                n_prune = self._prune_gs(params, optimizers, superq, state, step)
+                n_prune = self._prune_gs(params, optimizers, superq, superq_optimizers, state, step)
                 if self.verbose:
                     print(
                         f"Step {step}: {n_prune} GSs pruned. "
@@ -317,6 +319,7 @@ class SuperStrategy(Strategy):
         params: Union[Dict[str, torch.nn.Parameter], torch.nn.ParameterDict],
         optimizers: Dict[str, torch.optim.Optimizer],
         superq: SuperQ,
+        superq_optimizers: Dict[str, torch.optim.Optimizer],
         state: Dict[str, Any],
         step: int,
     ) -> int:
@@ -334,11 +337,14 @@ class SuperStrategy(Strategy):
             if step < self.refine_scale2d_stop_iter:
                 is_too_big |= state["radii"] > self.prune_scale2d
 
-            is_prune = is_prune | is_too_big
+            is_prune = is_prune #| is_too_big
 
         n_prune = is_prune.sum().item()
         if n_prune > 0:
             remove(params=params, optimizers=optimizers, state=state, mask=is_prune)
+            tmp_dict = {'offsets': superq.offsets}
+            remove(params=tmp_dict, optimizers={'offsets': superq_optimizers['offsets']}, state={}, mask=is_prune)
+            superq.offsets = tmp_dict['offsets']
             superq.prune_gs(is_prune)
 
         return n_prune
