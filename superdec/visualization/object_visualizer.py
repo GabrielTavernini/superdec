@@ -32,7 +32,7 @@ def main(cfg: DictConfig) -> None:
   names = predictions_sq.names
 
   if cfg.dataset == 'scene': # visualization for scenes
-    server.scene.set_up_direction([0.0, 1.0, 0.0])
+    server.scene.set_up_direction([0.0, 0.0, 1.0])
     num_objects = len(meshes)
     colors = generate_ncolors(num_objects)/255 #(max(int_ids)+1)/255
     for idx in range(len(meshes)):

@@ -36,6 +36,15 @@ def denormalize_outdict(outdict, translation, scale, z_up=False):
     translation = translation[:, None, :]
     outdict['scale'] = outdict['scale'] * scale
     outdict['trans'] = outdict['trans'] * scale + translation 
+    if z_up:
+        # transform sq by updating translation and rotation
+        outdict['trans'] = torch.tensor(rotate_around_axis(outdict['trans'].cpu().numpy(), axis=(1,0,0), angle = np.pi/2, center_point=np.zeros(3)))
+        outdict['rotate'] = outdict['rotate'].cpu().numpy()
+        rot_x_90 = np.array([[1,0,0],[0,0,-1],[0,1,0]])
+        for i in range(outdict['rotate'].shape[0]):
+            outdict['rotate'][i] = rot_x_90 @ outdict['rotate'][i]
+        outdict['rotate'] = torch.from_numpy(outdict['rotate'])
+        
     return outdict
 
 def get_transforms(split: str, cfg):

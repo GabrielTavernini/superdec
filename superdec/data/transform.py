@@ -212,28 +212,39 @@ def to_tuple(param, low=None, bias=None):
 
 def rotate_around_axis(points, axis, angle, center_point=None):
     """
-    Return the rotation matrix associated with counterclockwise rotation about
-    the given axis by angle in radians.
-    https://stackoverflow.com/questions/6802577/rotation-of-3d-vector
+    Rotate points around given axis by `angle` (radians).
+    Works for shapes (..., 3) – arbitrary leading batch dims.
     """
+    points = np.asarray(points)
+    orig_shape = points.shape          # e.g. (B, N, 3)
+    pts = points.reshape(-1, orig_shape[-1])  # (N_total, C), C >= 3
+
     if center_point is None:
-        center_point = points[:, :3].mean(axis=0).astype(points[:, :3].dtype)
-    axis = axis / np.sqrt(np.dot(axis, axis))
+        center_point = pts[:, :3].mean(axis=0).astype(pts.dtype)
+
+    axis = np.asarray(axis, dtype=pts.dtype)
+    axis = axis / np.linalg.norm(axis)
+
     a = np.cos(angle / 2.0)
     b, c, d = -axis * np.sin(angle / 2.0)
-    aa, bb, cc, dd = a * a, b * b, c * c, d * d
-    bc, ad, ac, ab, bd, cd = b * c, a * d, a * c, a * b, b * d, c * d
+    aa, bb, cc, dd = a*a, b*b, c*c, d*d
+    bc, ad, ac, ab, bd, cd = b*c, a*d, a*c, a*b, b*d, c*d
+
     rotation_matrix = np.array(
         [
-            [aa + bb - cc - dd, 2 * (bc + ad), 2 * (bd - ac)],
-            [2 * (bc - ad), aa + cc - bb - dd, 2 * (cd + ab)],
-            [2 * (bd + ac), 2 * (cd - ab), aa + dd - bb - cc],
-        ]
+            [aa + bb - cc - dd, 2 * (bc + ad),     2 * (bd - ac)],
+            [2 * (bc - ad),     aa + cc - bb - dd, 2 * (cd + ab)],
+            [2 * (bd + ac),     2 * (cd - ab),     aa + dd - bb - cc],
+        ],
+        dtype=pts.dtype,
     )
-    points[:, :3] = points[:, :3] - center_point
-    points[:, :3] = np.dot(points[:, :3], rotation_matrix.T)
-    points[:, :3] = points[:, :3] + center_point
-    return points
+
+    pts[:, :3] = pts[:, :3] - center_point
+    pts[:, :3] = pts[:, :3] @ rotation_matrix.T
+    pts[:, :3] = pts[:, :3] + center_point
+
+    return pts.reshape(orig_shape)
+
 
 
 
