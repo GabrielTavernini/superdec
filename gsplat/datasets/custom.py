@@ -81,7 +81,7 @@ class Parser:
         imsize = (width, height)
         for file in im_names:
             im_n = int(file.split(".")[0])
-            c2w = np.load(f"tmp_chair/c2w/{im_n}.npy")
+            c2w = np.load(os.path.join(c2w_dir, f"{im_n}.npy"))
             c2w_mats.append(c2w)
         print(
             f"[Parser] {len(im_names)} images."

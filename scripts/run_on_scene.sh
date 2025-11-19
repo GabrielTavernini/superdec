@@ -4,9 +4,9 @@ set -euo pipefail  # stop on error, undefined variable, or pipeline failure
 # trap to print the failing command
 trap 'echo "Error occurred at command: $BASH_COMMAND"' ERR
 
-OBJECTS_SCENE_DIR=data/scenes/scene_example # path to the folder containing the .ply files of all the segmented objects in the scene
+OBJECTS_SCENE_DIR=data/3f1e1610de/objects # path to the folder containing the .ply files of all the segmented objects in the scene
 OUTPUT_NPZ_DIR=data/output_npz # path to the folder where to save the output .npz files
-SCENE_NAME=scene_example # name of the scene (used to name the output .npz file)
+SCENE_NAME=3f1e1610de # name of the scene (used to name the output .npz file)
 Z_UP=true
 
 python superdec/utils/ply_to_npz.py --input_path="$OBJECTS_SCENE_DIR" --scene_name="$SCENE_NAME"

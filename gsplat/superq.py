@@ -63,12 +63,13 @@ class SuperQ(nn.Module):
         self.is_prune |= tmp.reshape(self.etas.shape)
 
     def update_handler(self):
-        # TODO: fix to work with multiple objects
-        # self.pred_handler.scale[0][self.mask] = self.sqscale.detach().cpu().numpy()
-        # self.pred_handler.exponents[0][self.mask] = self.exponents.detach().cpu().numpy()
-        # self.pred_handler.translation[0][self.mask] = self.translation.detach().cpu().numpy()
-        # self.pred_handler.rotation[0][self.mask] = self.rotation.detach().cpu().numpy()
-        # meshes = self.pred_handler.get_meshes(resolution=30)
+        batch_size = self.pred_handler.scale.shape[1]
+        mask = self.mask.reshape(-1, batch_size)
+        self.pred_handler.scale[mask] = self.sqscale.detach().cpu().numpy()
+        self.pred_handler.exponents[mask] = self.exponents.detach().cpu().numpy()
+        self.pred_handler.translation[mask] = self.translation.detach().cpu().numpy()
+        self.pred_handler.rotation[mask] = self.rotation.detach().cpu().numpy()
+        meshes = self.pred_handler.get_meshes(resolution=30)
         return self.pred_handler
 
     def fexp(self, x, p):

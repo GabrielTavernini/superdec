@@ -121,9 +121,25 @@ class Parser:
         imsize_dict[camera_id] = (data["w"] // factor, data["h"] // factor)
         mask_dict[camera_id] = None
 
+        S = np.array([
+            [1, 0,  0, 0],
+            [0, -1, 0, 0],
+            [0, 0, -1, 0],
+            [0, 0,  0, 1]
+        ])
+
+        Rz_90 = np.array([
+            [0, 1, 0, 0],
+            [-1, 0, 0, 0],
+            [0,  0, 1, 0],
+            [0,  0, 0, 1]
+        ])
+
         for k in data["frames"]:
             w2c = np.array(k["transform_matrix"])
-            print(w2c)
+            w2c = np.linalg.inv(w2c)
+            w2c = w2c @ S
+            w2c = w2c @ Rz_90
             w2c_mats.append(w2c)
             camera_ids.append(camera_id)
         print(
@@ -138,7 +154,7 @@ class Parser:
         w2c_mats = np.stack(w2c_mats, axis=0)
 
         # Convert extrinsics to camera-to-world.
-        camtoworlds = np.linalg.inv(w2c_mats)
+        camtoworlds = np.linalg.inv(w2c_mats) @ S
 
         # Image names from COLMAP. No need for permuting the poses according to
         # image names anymore.
@@ -196,6 +212,9 @@ class Parser:
         self.image_paths = image_paths  # List[str], (num_images,)
         self.camtoworlds = camtoworlds  # np.ndarray, (num_images, 4, 4)
         self.camera_ids = camera_ids  # List[int], (num_images,)
+        self.K = Ks_dict[camera_id]  # Dict of camera_id -> K
+        self.params = params_dict[camera_id]  # Dict of camera_id -> params
+        self.imsize = imsize_dict[camera_id]  # Dict of camera_id -> (width, height)
         self.Ks_dict = Ks_dict  # Dict of camera_id -> K
         self.params_dict = params_dict  # Dict of camera_id -> params
         self.imsize_dict = imsize_dict  # Dict of camera_id -> (width, height)
@@ -318,6 +337,7 @@ class Dataset:
         index = self.indices[item]
         image = imageio.imread(self.parser.image_paths[index])[..., :3]
         camera_id = self.parser.camera_ids[index]
+        name = self.parser.image_names[index]
         K = self.parser.Ks_dict[camera_id].copy()  # undistorted K
         params = self.parser.params_dict[camera_id]
         camtoworlds = self.parser.camtoworlds[index]
@@ -346,6 +366,7 @@ class Dataset:
             "K": torch.from_numpy(K).float(),
             "camtoworld": torch.from_numpy(camtoworlds).float(),
             "image": torch.from_numpy(image).float(),
+            "name": name,  # the index of the image in the dataset
             "image_id": item,  # the index of the image in the dataset
         }
         if mask is not None:

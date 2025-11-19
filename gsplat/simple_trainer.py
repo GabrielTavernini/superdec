@@ -15,7 +15,7 @@ import tqdm
 import tyro
 import viser
 import yaml
-from datasets.custom import Dataset, Parser
+from datasets.scannetpp import Dataset, Parser
 from datasets.traj import (
     generate_ellipse_path_z,
     generate_interpolated_path,
@@ -52,11 +52,11 @@ class Config:
     render_traj_path: str = "interp"
 
     # Path to the Mip-NeRF 360 dataset
-    data_dir: str = "tmp_chair"
+    data_dir: str = "data/scenes/3f1e1610de/dslr"
     # Downsample factor for the dataset
     data_factor: int = 4
     # Directory to save results
-    result_dir: str = "results/chair_no_sq"
+    result_dir: str = "results/3f1e1610de_no_sq"
     # Every N images there is a test image
     test_every: int = 8
     # Random crop size for training  (experimental)
@@ -72,9 +72,9 @@ class Config:
     port: int = 8080
 
     # Batch size for training. Learning rates are scaled automatically
-    batch_size: int = 1
+    batch_size: int = 10
     # A global factor to scale the number of training steps
-    steps_scaler: float = 1.0
+    steps_scaler: float = .1
 
     # Number of training steps
     max_steps: int = 30_000

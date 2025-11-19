@@ -15,7 +15,7 @@ import tqdm
 import tyro
 import viser
 import yaml
-from datasets.custom import Dataset, Parser
+from datasets.scannetpp import Dataset, Parser
 from datasets.traj import (
     generate_ellipse_path_z,
     generate_interpolated_path,
@@ -44,8 +44,8 @@ from superdec.utils.predictions_handler import PredictionHandler
 @dataclass
 class Config:
     # New configs
-    num_pts_per_sq: int = 5_000
-    pred_npz: str = "test.npz"
+    num_pts_per_sq: int = 2000
+    pred_npz: str = "data/output_npz/3f1e1610de.npz"
 
     # Disable viewer
     disable_viewer: bool = False
@@ -57,12 +57,11 @@ class Config:
     render_traj_path: str = "interp"
 
     # Path to the Mip-NeRF 360 dataset
-    # data_dir: str = "data/360_v2/garden"
-    data_dir: str = "tmp_chair"
+    data_dir: str = "data/3f1e1610de/dslr/"
     # Downsample factor for the dataset
     # data_factor: int = 4
     # Directory to save results
-    result_dir: str = "results/chair"
+    result_dir: str = "results/3f1e1610de"
     # Every N images there is a test image
     test_every: int = 8
     # Random crop size for training  (experimental)
@@ -85,9 +84,11 @@ class Config:
     # Number of training steps
     max_steps: int = 30_000
     # Steps to evaluate the model
-    eval_steps: List[int] = field(default_factory=lambda: [1, 3_000, 7_000, 30_000])
+    eval_steps: List[int] = field(default_factory=lambda: [10, 3_000, 7_000, 30_000])
     # Steps to save the model
-    save_steps: List[int] = field(default_factory=lambda: [1, 3_000, 7_000, 30_000])
+    save_steps: List[int] = field(default_factory=lambda: [10, 3_000, 7_000, 30_000])
+    # Whether to save superq file
+    save_superq: bool = True
     # Whether to save ply file (storage size can be large)
     save_ply: bool = False
     # Steps to save the model as ply
@@ -321,6 +322,8 @@ class Runner:
         os.makedirs(self.render_dir, exist_ok=True)
         self.ply_dir = f"{cfg.result_dir}/ply"
         os.makedirs(self.ply_dir, exist_ok=True)
+        self.superq_dir = f"{cfg.result_dir}/superq"
+        os.makedirs(self.superq_dir, exist_ok=True)
 
         # Tensorboard
         self.writer = SummaryWriter(log_dir=f"{cfg.result_dir}/tb")
@@ -767,6 +770,10 @@ class Runner:
 
             # save checkpoint before updating the model
             if step in [i - 1 for i in cfg.save_steps] or step == max_steps - 1:
+                if cfg.save_superq:
+                    handler = self.superq.update_handler()
+                    handler.save_npz(f"{self.superq_dir}/superq_{step:04d}.npz")
+
                 mem = torch.cuda.max_memory_allocated() / 1024**3
                 stats = {
                     "mem": mem,
@@ -915,9 +922,6 @@ class Runner:
     @torch.no_grad()
     def eval(self, step: int, stage: str = "val"):
         """Entry for evaluation."""
-        handler = self.superq.update_handler()
-        handler.save_npz(f"test_{step}.npz")
-        
         print("Running evaluation...")
         cfg = self.cfg
         device = self.device

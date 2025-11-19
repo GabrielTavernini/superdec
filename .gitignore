@@ -13,7 +13,7 @@ superdec/fast_sampler/_sampler.cpp
 render*
 *.mp4
 build*
-data*
+data/*
 tmp*
 *.pt
 checkpoints*
