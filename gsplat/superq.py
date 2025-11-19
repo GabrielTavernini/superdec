@@ -26,6 +26,8 @@ class SuperQ(nn.Module):
         self.rotation = torch.tensor(pred_handler.rotation.reshape(-1, 3, 3)[self.mask], dtype=torch.float, device=device)
         self.pred_handler = pred_handler
 
+        print(f"Loaded {self.sqscale.shape[0]} superquadircs.")
+
         self.negative_offset = negative_offset
         self.max_offset = max_offset
 
@@ -62,11 +64,11 @@ class SuperQ(nn.Module):
 
     def update_handler(self):
         # TODO: fix to work with multiple objects
-        self.pred_handler.scale[0][self.mask] = self.sqscale.detach().cpu().numpy()
-        self.pred_handler.exponents[0][self.mask] = self.exponents.detach().cpu().numpy()
-        self.pred_handler.translation[0][self.mask] = self.translation.detach().cpu().numpy()
-        self.pred_handler.rotation[0][self.mask] = self.rotation.detach().cpu().numpy()
-        meshes = self.pred_handler.get_meshes(resolution=30)
+        # self.pred_handler.scale[0][self.mask] = self.sqscale.detach().cpu().numpy()
+        # self.pred_handler.exponents[0][self.mask] = self.exponents.detach().cpu().numpy()
+        # self.pred_handler.translation[0][self.mask] = self.translation.detach().cpu().numpy()
+        # self.pred_handler.rotation[0][self.mask] = self.rotation.detach().cpu().numpy()
+        # meshes = self.pred_handler.get_meshes(resolution=30)
         return self.pred_handler
 
     def fexp(self, x, p):
