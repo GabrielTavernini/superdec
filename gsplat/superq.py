@@ -11,7 +11,7 @@ class SuperQ(nn.Module):
         pred_handler: PredictionHandler,
         num_pts_per_sq: int = 400,
         negative_offset: bool = True,
-        max_offset: float = 0.02,
+        max_offset: float = 0.05,
         device: str = "cuda",
     ):
         # Anything self.x = nn.Parameter(...) is trainable

@@ -35,18 +35,13 @@ from gsplat.compression import PngCompression
 from gsplat.distributed import cli
 from gsplat.optimizers import SelectiveAdam
 from gsplat.rendering import rasterization
+from gsplat.strategy import DefaultStrategy, MCMCStrategy
 from gsplat_viewer import GsplatViewer, GsplatRenderTabState
 from nerfview import CameraState, RenderTabState, apply_float_colormap
-from superq import SuperQ
-from superstrat import SuperStrategy
-from superdec.utils.predictions_handler import PredictionHandler
+
 
 @dataclass
 class Config:
-    # New configs
-    num_pts_per_sq: int = 5_000
-    pred_npz: str = "test.npz"
-
     # Disable viewer
     disable_viewer: bool = False
     # Path to the .pt files. If provide, it will skip training and run evaluation only.
@@ -57,12 +52,11 @@ class Config:
     render_traj_path: str = "interp"
 
     # Path to the Mip-NeRF 360 dataset
-    # data_dir: str = "data/360_v2/garden"
     data_dir: str = "tmp_chair"
     # Downsample factor for the dataset
-    # data_factor: int = 4
+    data_factor: int = 4
     # Directory to save results
-    result_dir: str = "results/chair"
+    result_dir: str = "results/chair_no_sq"
     # Every N images there is a test image
     test_every: int = 8
     # Random crop size for training  (experimental)
@@ -70,7 +64,7 @@ class Config:
     # A global scaler that applies to the scene size related parameters
     global_scale: float = 1.0
     # Normalize the world space
-    # normalize_world_space: bool = False
+    normalize_world_space: bool = True
     # Camera model
     camera_model: Literal["pinhole", "ortho", "fisheye"] = "pinhole"
 
@@ -78,23 +72,29 @@ class Config:
     port: int = 8080
 
     # Batch size for training. Learning rates are scaled automatically
-    batch_size: int = 10
+    batch_size: int = 1
     # A global factor to scale the number of training steps
-    steps_scaler: float = 0.1
+    steps_scaler: float = 1.0
 
     # Number of training steps
     max_steps: int = 30_000
     # Steps to evaluate the model
-    eval_steps: List[int] = field(default_factory=lambda: [1, 3_000, 7_000, 30_000])
+    eval_steps: List[int] = field(default_factory=lambda: [7_000, 30_000])
     # Steps to save the model
-    save_steps: List[int] = field(default_factory=lambda: [1, 3_000, 7_000, 30_000])
+    save_steps: List[int] = field(default_factory=lambda: [7_000, 30_000])
     # Whether to save ply file (storage size can be large)
     save_ply: bool = False
     # Steps to save the model as ply
     ply_steps: List[int] = field(default_factory=lambda: [7_000, 30_000])
     # Whether to disable video generation during training and evaluation
-    disable_video: bool = True
+    disable_video: bool = False
 
+    # Initialization strategy
+    init_type: str = "random"
+    # Initial number of GSs. Ignored if using sfm
+    init_num_pts: int = 100_000
+    # Initial extent of GSs as a multiple of the camera extent. Ignored if using sfm
+    init_extent: float = 3.0
     # Degree of spherical harmonics
     sh_degree: int = 3
     # Turn on another SH degree every this steps
@@ -112,8 +112,8 @@ class Config:
     far_plane: float = 1e10
 
     # Strategy for GS densification
-    strategy: Union[SuperStrategy] = field(
-        default_factory=SuperStrategy
+    strategy: Union[DefaultStrategy, MCMCStrategy] = field(
+        default_factory=DefaultStrategy
     )
     # Use packed mode for rasterization, this leads to less memory usage but slightly slower.
     packed: bool = False
@@ -126,11 +126,9 @@ class Config:
 
     # Use random background for training to discourage transparency
     random_bkgd: bool = False
-    # Use a colored background
-    bkgd_color: List[float] = field(default_factory=lambda: [255.0, 255.0, 255.0])
 
     # LR for 3D point positions
-    means_lr: float = 5e-4#1.6e-4
+    means_lr: float = 1.6e-4
     # LR for Gaussian scale factors
     scales_lr: float = 5e-3
     # LR for alpha blending weights
@@ -197,15 +195,24 @@ class Config:
         self.sh_degree_interval = int(self.sh_degree_interval * factor)
 
         strategy = self.strategy
-        strategy.refine_start_iter = int(strategy.refine_start_iter * factor)
-        strategy.refine_stop_iter = int(strategy.refine_stop_iter * factor)
-        strategy.reset_every = int(strategy.reset_every * factor)
-        strategy.refine_every = int(strategy.refine_every * factor)
+        if isinstance(strategy, DefaultStrategy):
+            strategy.refine_start_iter = int(strategy.refine_start_iter * factor)
+            strategy.refine_stop_iter = int(strategy.refine_stop_iter * factor)
+            strategy.reset_every = int(strategy.reset_every * factor)
+            strategy.refine_every = int(strategy.refine_every * factor)
+        elif isinstance(strategy, MCMCStrategy):
+            strategy.refine_start_iter = int(strategy.refine_start_iter * factor)
+            strategy.refine_stop_iter = int(strategy.refine_stop_iter * factor)
+            strategy.refine_every = int(strategy.refine_every * factor)
+        else:
+            assert_never(strategy)
+
 
 def create_splats_with_optimizers(
     parser: Parser,
-    pred_handler: PredictionHandler,
-    num_pts_per_sq: int = 400,
+    init_type: str = "sfm",
+    init_num_pts: int = 100_000,
+    init_extent: float = 3.0,
     init_opacity: float = 0.1,
     init_scale: float = 1.0,
     means_lr: float = 1.6e-4,
@@ -224,12 +231,14 @@ def create_splats_with_optimizers(
     world_rank: int = 0,
     world_size: int = 1,
 ) -> Tuple[torch.nn.ParameterDict, Dict[str, torch.optim.Optimizer]]:
-    superq = SuperQ(pred_handler, num_pts_per_sq, device=device)
-    with torch.no_grad():
-        points = superq()
-
-    N = points.shape[0]
-    rgbs = torch.rand((N, 3))
+    if init_type == "sfm":
+        points = torch.from_numpy(parser.points).float()
+        rgbs = torch.from_numpy(parser.points_rgb / 255.0).float()
+    elif init_type == "random":
+        points = init_extent * scene_scale * (torch.rand((init_num_pts, 3)) * 2 - 1)
+        rgbs = torch.rand((init_num_pts, 3))
+    else:
+        raise ValueError("Please specify a correct init_type: sfm or random")
 
     # Initialize the GS size to be the average dist of the 3 nearest neighbors
     dist2_avg = (knn(points, 4)[:, 1:] ** 2).mean(dim=-1)  # [N,]
@@ -239,12 +248,15 @@ def create_splats_with_optimizers(
     # Distribute the GSs to different ranks (also works for single rank)
     points = points[world_rank::world_size]
     rgbs = rgbs[world_rank::world_size]
-    scales = scales[world_rank::world_size]    
+    scales = scales[world_rank::world_size]
+
+    N = points.shape[0]
     quats = torch.rand((N, 4))  # [N, 4]
     opacities = torch.logit(torch.full((N,), init_opacity))  # [N,]
-    
+
     params = [
         # name, value, lr
+        ("means", torch.nn.Parameter(points), means_lr * scene_scale),
         ("scales", torch.nn.Parameter(scales), scales_lr),
         ("quats", torch.nn.Parameter(quats), quats_lr),
         ("opacities", torch.nn.Parameter(opacities), opacities_lr),
@@ -264,7 +276,6 @@ def create_splats_with_optimizers(
         params.append(("colors", torch.nn.Parameter(colors), sh0_lr))
 
     splats = torch.nn.ParameterDict({n: v for n, v, _ in params}).to(device)
-
     # Scale learning rate based on batch size, reference:
     # https://www.cs.princeton.edu/~smalladi/blog/2024/01/22/SDEs-ScalingRules/
     # Note that this would not make the training exactly equivalent, see
@@ -286,13 +297,7 @@ def create_splats_with_optimizers(
         )
         for name, _, lr in params
     }
-    superq_optimizer = optimizer_class(
-        [{"params": superq.named_parameters(), "lr": means_lr * scene_scale * math.sqrt(BS), "name": "superq"}],
-        eps=1e-15 / math.sqrt(BS),
-        # TODO: check betas logic when BS is larger than 10 betas[0] will be zero.
-        betas=(1 - BS * (1 - 0.9), 1 - BS * (1 - 0.999)),
-    )
-    return splats, optimizers, superq, superq_optimizer
+    return splats, optimizers
 
 
 class Runner:
@@ -326,30 +331,29 @@ class Runner:
         self.writer = SummaryWriter(log_dir=f"{cfg.result_dir}/tb")
 
         # Load data: Training data should contain initial points and colors.
-        self.pred_handler = PredictionHandler.from_npz(cfg.pred_npz)
         self.parser = Parser(
             data_dir=cfg.data_dir,
+            # factor=cfg.data_factor,
+            # normalize=cfg.normalize_world_space,
             test_every=cfg.test_every,
         )
         self.trainset = Dataset(
             self.parser,
             split="train",
             patch_size=cfg.patch_size,
+            # load_depths=cfg.depth_loss,
         )
         self.valset = Dataset(self.parser, split="val")
         self.scene_scale = self.parser.scene_scale * 1.1 * cfg.global_scale
         print("Scene scale:", self.scene_scale)
-        
-        self.backgrounds = None
-        if cfg.bkgd_color:
-            self.backgrounds = torch.tensor([cfg.bkgd_color], device=self.device)/ 255.0
 
         # Model
         feature_dim = 32 if cfg.app_opt else None
-        self.splats, self.optimizers, self.superq, self.superq_optimizer = create_splats_with_optimizers(
+        self.splats, self.optimizers = create_splats_with_optimizers(
             self.parser,
-            self.pred_handler,
-            num_pts_per_sq=cfg.num_pts_per_sq,
+            init_type=cfg.init_type,
+            init_num_pts=cfg.init_num_pts,
+            init_extent=cfg.init_extent,
             init_opacity=cfg.init_opa,
             init_scale=cfg.init_scale,
             means_lr=cfg.means_lr,
@@ -368,13 +372,19 @@ class Runner:
             world_rank=world_rank,
             world_size=world_size,
         )
-        print("Model initialized. Number of GS:", len(self.splats["opacities"]))
+        print("Model initialized. Number of GS:", len(self.splats["means"]))
 
         # Densification Strategy
         self.cfg.strategy.check_sanity(self.splats, self.optimizers)
-        self.strategy_state = self.cfg.strategy.initialize_state(
-            scene_scale=self.scene_scale
-        )
+
+        if isinstance(self.cfg.strategy, DefaultStrategy):
+            self.strategy_state = self.cfg.strategy.initialize_state(
+                scene_scale=self.scene_scale
+            )
+        elif isinstance(self.cfg.strategy, MCMCStrategy):
+            self.strategy_state = self.cfg.strategy.initialize_state()
+        else:
+            assert_never(self.cfg.strategy)
 
         # Compression Strategy
         self.compression_method = None
@@ -469,32 +479,6 @@ class Runner:
                 mode="training",
             )
 
-    def show_cam(self, i, c2w, server, special=False):
-        from scipy.spatial.transform import Rotation as R
-
-        c2w = c2w.detach().cpu().numpy()[0]
-        R_wc = c2w[:3, :3]
-        t_wc = c2w[:3, 3]
-        # print(t_wc)
-
-        # Convert rotation matrix → quaternion (wxyz for viser)
-        quat_xyzw = R.from_matrix(R_wc).as_quat()  # (x,y,z,w)
-        qx, qy, qz, qw = quat_xyzw
-        quat_wxyz = (qw, qx, qy, qz)
-
-        server.scene.add_camera_frustum(
-            name=f"cam_{i}",
-            fov=60,
-            aspect=1,
-            scale=0.1,
-            line_width=2.0,
-            color=(0.2, 0.2, 0.8) if special else (0.8, 0.2, 0.8),
-            wxyz=quat_wxyz,
-            position=t_wc,
-            visible=True,
-            variant="wireframe",
-        )
-
     def rasterize_splats(
         self,
         camtoworlds: Tensor,
@@ -506,7 +490,7 @@ class Runner:
         camera_model: Optional[Literal["pinhole", "ortho", "fisheye"]] = None,
         **kwargs,
     ) -> Tuple[Tensor, Tensor, Dict]:
-        means = self.superq()  # [N, 3]
+        means = self.splats["means"]  # [N, 3]
         # quats = F.normalize(self.splats["quats"], dim=-1)  # [N, 4]
         # rasterization does normalization internally
         quats = self.splats["quats"]  # [N, 4]
@@ -541,7 +525,11 @@ class Runner:
             width=width,
             height=height,
             packed=self.cfg.packed,
-            absgrad=self.cfg.strategy.absgrad,
+            absgrad=(
+                self.cfg.strategy.absgrad
+                if isinstance(self.cfg.strategy, DefaultStrategy)
+                else False
+            ),
             sparse_grad=self.cfg.sparse_grad,
             rasterize_mode=rasterize_mode,
             distributed=self.world_size > 1,
@@ -569,9 +557,9 @@ class Runner:
         init_step = 0
 
         schedulers = [
-            # superq has a learning rate schedule, that end at 0.01 of the initial value
+            # means has a learning rate schedule, that end at 0.01 of the initial value
             torch.optim.lr_scheduler.ExponentialLR(
-                self.superq_optimizer, gamma=0.01 ** (1.0 / max_steps)
+                self.optimizers["means"], gamma=0.01 ** (1.0 / max_steps)
             ),
         ]
         if cfg.pose_opt:
@@ -624,8 +612,7 @@ class Runner:
                 trainloader_iter = iter(trainloader)
                 data = next(trainloader_iter)
 
-            camtoworlds = camtoworlds_gt = data["camtoworld"].to(device)  # [1, 4, 4])
-            # self.show_cam(data["image_id"], camtoworlds, self.server)
+            camtoworlds = camtoworlds_gt = data["camtoworld"].to(device)  # [1, 4, 4]
             Ks = data["K"].to(device)  # [1, 3, 3]
             pixels = data["image"].to(device) / 255.0  # [1, H, W, 3]
             num_train_rays_per_step = (
@@ -660,7 +647,6 @@ class Runner:
                 image_ids=image_ids,
                 render_mode="RGB+ED" if cfg.depth_loss else "RGB",
                 masks=masks,
-                backgrounds=self.backgrounds.repeat(camtoworlds.shape[0], 1),
             )
             if renders.shape[-1] == 4:
                 colors, depths = renders[..., 0:3], renders[..., 3:4]
@@ -753,7 +739,7 @@ class Runner:
                 self.writer.add_scalar("train/loss", loss.item(), step)
                 self.writer.add_scalar("train/l1loss", l1loss.item(), step)
                 self.writer.add_scalar("train/ssimloss", ssimloss.item(), step)
-                self.writer.add_scalar("train/num_GS", len(self.splats["opacities"]), step)
+                self.writer.add_scalar("train/num_GS", len(self.splats["means"]), step)
                 self.writer.add_scalar("train/mem", mem, step)
                 if cfg.depth_loss:
                     self.writer.add_scalar("train/depthloss", depthloss.item(), step)
@@ -771,7 +757,7 @@ class Runner:
                 stats = {
                     "mem": mem,
                     "ellipse_time": time.time() - global_tic,
-                    "num_GS": len(self.splats["opacities"]),
+                    "num_GS": len(self.splats["means"]),
                 }
                 print("Step: ", step, stats)
                 with open(
@@ -779,11 +765,7 @@ class Runner:
                     "w",
                 ) as f:
                     json.dump(stats, f)
-                data = {
-                    "step": step, 
-                    "splats": self.splats.state_dict(),
-                    "superq": self.superq.state_dict()
-                }
+                data = {"step": step, "splats": self.splats.state_dict()}
                 if cfg.pose_opt:
                     if world_size > 1:
                         data["pose_adjust"] = self.pose_adjust.module.state_dict()
@@ -806,7 +788,7 @@ class Runner:
                     rgb = self.app_module(
                         features=self.splats["features"],
                         embed_ids=None,
-                        dirs=torch.zeros_like(self.splats["opacities"][None, :, :]),
+                        dirs=torch.zeros_like(self.splats["means"][None, :, :]),
                         sh_degree=sh_degree_to_use,
                     )
                     rgb = rgb + self.splats["colors"]
@@ -817,8 +799,7 @@ class Runner:
                     sh0 = self.splats["sh0"]
                     shN = self.splats["shN"]
 
-                with torch.no_grad():
-                    means = self.superq()  # [N, 3]
+                means = self.splats["means"]
                 scales = self.splats["scales"]
                 quats = self.splats["quats"]
                 opacities = self.splats["opacities"]
@@ -865,8 +846,6 @@ class Runner:
                 else:
                     optimizer.step()
                 optimizer.zero_grad(set_to_none=True)
-            self.superq_optimizer.step()
-            self.superq_optimizer.zero_grad(set_to_none=True)
             for optimizer in self.pose_optimizers:
                 optimizer.step()
                 optimizer.zero_grad(set_to_none=True)
@@ -880,15 +859,26 @@ class Runner:
                 scheduler.step()
 
             # Run post-backward steps after backward and optimizer
-            self.cfg.strategy.step_post_backward(
-                params=self.splats,
-                optimizers=self.optimizers,
-                superq=self.superq,
-                state=self.strategy_state,
-                step=step,
-                info=info,
-                packed=cfg.packed,
-            )
+            if isinstance(self.cfg.strategy, DefaultStrategy):
+                self.cfg.strategy.step_post_backward(
+                    params=self.splats,
+                    optimizers=self.optimizers,
+                    state=self.strategy_state,
+                    step=step,
+                    info=info,
+                    packed=cfg.packed,
+                )
+            elif isinstance(self.cfg.strategy, MCMCStrategy):
+                self.cfg.strategy.step_post_backward(
+                    params=self.splats,
+                    optimizers=self.optimizers,
+                    state=self.strategy_state,
+                    step=step,
+                    info=info,
+                    lr=schedulers[0].get_last_lr()[0],
+                )
+            else:
+                assert_never(self.cfg.strategy)
 
             # eval the full set
             if step in [i - 1 for i in cfg.eval_steps]:
@@ -915,9 +905,6 @@ class Runner:
     @torch.no_grad()
     def eval(self, step: int, stage: str = "val"):
         """Entry for evaluation."""
-        handler = self.superq.update_handler()
-        handler.save_npz(f"test_{step}.npz")
-        
         print("Running evaluation...")
         cfg = self.cfg
         device = self.device
@@ -947,7 +934,6 @@ class Runner:
                 near_plane=cfg.near_plane,
                 far_plane=cfg.far_plane,
                 masks=masks,
-                backgrounds=self.backgrounds.repeat(camtoworlds.shape[0], 1),
             )  # [1, H, W, 3]
             torch.cuda.synchronize()
             ellipse_time += max(time.time() - tic, 1e-10)
@@ -983,7 +969,7 @@ class Runner:
             stats.update(
                 {
                     "ellipse_time": ellipse_time,
-                    "num_GS": len(self.splats["opacities"]),
+                    "num_GS": len(self.splats["means"]),
                 }
             )
             if cfg.use_bilateral_grid:
@@ -1068,7 +1054,6 @@ class Runner:
                 near_plane=cfg.near_plane,
                 far_plane=cfg.far_plane,
                 render_mode="RGB+ED",
-                backgrounds=self.backgrounds.repeat(camtoworlds.shape[0], 1),
             )  # [1, H, W, 4]
             colors = torch.clamp(renders[..., 0:3], 0.0, 1.0)  # [1, H, W, 3]
             depths = renders[..., 3:4]  # [1, H, W, 1]
@@ -1138,7 +1123,7 @@ class Runner:
             rasterize_mode=render_tab_state.rasterize_mode,
             camera_model=render_tab_state.camera_model,
         )  # [1, H, W, 3]
-        render_tab_state.total_gs_count = len(self.splats["opacities"])
+        render_tab_state.total_gs_count = len(self.splats["means"])
         render_tab_state.rendered_gs_count = (info["radii"] > 0).all(-1).sum().item()
 
         if render_tab_state.render_mode == "rgb":
@@ -1189,7 +1174,6 @@ def main(local_rank: int, world_rank, world_size: int, cfg: Config):
         ]
         for k in runner.splats.keys():
             runner.splats[k].data = torch.cat([ckpt["splats"][k] for ckpt in ckpts])
-        runner.superq.load_state_dict(ckpts[0]["superq"])
         step = ckpts[0]["step"]
         runner.eval(step=step)
         runner.render_traj(step=step)
@@ -1223,7 +1207,17 @@ if __name__ == "__main__":
         "default": (
             "Gaussian splatting training using densification heuristics from the original paper.",
             Config(
-                strategy=SuperStrategy(verbose=True),
+                strategy=DefaultStrategy(verbose=True),
+            ),
+        ),
+        "mcmc": (
+            "Gaussian splatting training using densification from the paper '3D Gaussian Splatting as Markov Chain Monte Carlo'.",
+            Config(
+                init_opa=0.5,
+                init_scale=0.1,
+                opacity_reg=0.01,
+                scale_reg=0.01,
+                strategy=MCMCStrategy(verbose=True),
             ),
         ),
     }
