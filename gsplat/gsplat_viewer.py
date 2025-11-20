@@ -21,6 +21,7 @@ class GsplatRenderTabState(RenderTabState):
         "rgb", "depth(accumulated)", "depth(expected)", "alpha"
     ] = "rgb"
     normalize_nearfar: bool = False
+    render_bkg: bool = True
     inverse: bool = False
     colormap: Literal[
         "turbo", "viridis", "magma", "inferno", "cividis", "gray"
@@ -157,6 +158,20 @@ class GsplatViewer(Viewer):
                     self.render_tab_state.render_mode = render_mode_dropdown.value
                     self.rerender(_)
 
+                render_bkg_checkbox = server.gui.add_checkbox(
+                    "Render Background",
+                    initial_value=self.render_tab_state.render_bkg,
+                    disabled=False,
+                    hint="Render background gaussians.",
+                )
+
+                @render_bkg_checkbox.on_update
+                def _(_) -> None:
+                    self.render_tab_state.render_bkg = (
+                        render_bkg_checkbox.value
+                    )
+                    self.rerender(_)
+
                 normalize_nearfar_checkbox = server.gui.add_checkbox(
                     "Normalize Near/Far",
                     initial_value=self.render_tab_state.normalize_nearfar,
@@ -228,6 +243,7 @@ class GsplatViewer(Viewer):
                 "eps2d_slider": eps2d_slider,
                 "backgrounds_slider": backgrounds_slider,
                 "render_mode_dropdown": render_mode_dropdown,
+                "render_bkg_checkbox": render_bkg_checkbox,
                 "normalize_nearfar_checkbox": normalize_nearfar_checkbox,
                 "inverse_checkbox": inverse_checkbox,
                 "colormap_dropdown": colormap_dropdown,

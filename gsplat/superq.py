@@ -1,6 +1,8 @@
 import torch
 import torch.nn as nn
 import numpy as np
+import open3d as o3d
+from typing import Optional
 
 from gsplat.strategy.ops import remove
 
@@ -15,11 +17,12 @@ class SuperQ(nn.Module):
         num_pts_background: int = 10000,
         negative_offset: bool = True,
         max_offset: float = 0.05,
+        background_ply: Optional[str] = None,
         device: str = "cuda",
     ):
         # Anything self.x = nn.Parameter(...) is trainable
-        # trainable = ["background", "offsets", "sqscale", "exponents", "translation", "rotation"]
-        trainable = ["background", "offsets"]
+        trainable = ["background", "offsets", "sqscale", "exponents", "translation", "rotation"]
+        # trainable = ["background", "offsets"]
 
         super().__init__()
         self.mask = (pred_handler.exist > 0.5).reshape(-1)
@@ -55,7 +58,13 @@ class SuperQ(nn.Module):
         self.register_buffer("sq_idx", torch.arange(S, device=device).repeat_interleave(num_pts_per_sq))
         self.offsets = torch.zeros(Ng, 3, device=device)
 
-        self.background = self._create_background(num_pts_background)
+        if background_ply is not None:
+            pcd = o3d.io.read_point_cloud(background_ply)
+            points_np = np.asarray(pcd.points)
+            idx = np.random.choice(points_np.shape[0], num_pts_background, replace=False)
+            self.background = torch.tensor(points_np[idx], device=device).float()
+        else:
+            self.background = self._create_background(num_pts_background)
 
         # Turn selected attributes into trainable parameters
         for name in trainable:

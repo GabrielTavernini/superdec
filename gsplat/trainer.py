@@ -43,10 +43,15 @@ from superdec.utils.predictions_handler import PredictionHandler
 
 @dataclass
 class Config:
+    scene_id: str = "00a231a370"
+
     # New configs
     num_pts_per_sq: int = 1000
+    pred_npz: str = f"data/output_npz/{scene_id}.npz"
+    
+    # Superq background
     num_pts_background: int = 50000
-    pred_npz: str = "data/output_npz/00a231a370.npz"
+    background_ply: Optional[str] = f"data/scannetpp_v2_backgrounds/{scene_id}_mesh_cropped.ply"
 
     # Disable viewer
     disable_viewer: bool = False
@@ -58,11 +63,11 @@ class Config:
     render_traj_path: str = "interp"
 
     # Path to the Mip-NeRF 360 dataset
-    data_dir: str = "data/00a231a370/dslr/"
+    data_dir: str = f"data/{scene_id}/dslr/"
     # Downsample factor for the dataset
     # data_factor: int = 4
     # Directory to save results
-    result_dir: str = "results/00a231a370_exp"
+    result_dir: str = f"results/{scene_id}_exp"
     # Every N images there is a test image
     test_every: int = 8
     # Random crop size for training  (experimental)
@@ -209,6 +214,7 @@ def create_splats_with_optimizers(
     pred_handler: PredictionHandler,
     num_pts_per_sq: int = 400,
     num_pts_background: int = 10000,
+    background_ply: Optional[str] = None,
     init_opacity: float = 0.1,
     init_scale: float = 1.0,
     means_lr: float = 1.6e-4,
@@ -227,7 +233,13 @@ def create_splats_with_optimizers(
     world_rank: int = 0,
     world_size: int = 1,
 ) -> Tuple[torch.nn.ParameterDict, Dict[str, torch.optim.Optimizer]]:
-    superq = SuperQ(pred_handler, num_pts_per_sq, num_pts_background, device=device)
+    superq = SuperQ(
+        pred_handler, 
+        num_pts_per_sq, 
+        num_pts_background, 
+        background_ply=background_ply,
+        device=device
+    )
     with torch.no_grad():
         points = superq()
 
@@ -358,6 +370,7 @@ class Runner:
             self.pred_handler,
             num_pts_per_sq=cfg.num_pts_per_sq,
             num_pts_background=cfg.num_pts_background,
+            background_ply=cfg.background_ply,
             init_opacity=cfg.init_opa,
             init_scale=cfg.init_scale,
             means_lr=cfg.means_lr,
@@ -509,6 +522,7 @@ class Runner:
         Ks: Tensor,
         width: int,
         height: int,
+        render_bkg: bool = True,
         masks: Optional[Tensor] = None,
         rasterize_mode: Optional[Literal["classic", "antialiased"]] = None,
         camera_model: Optional[Literal["pinhole", "ortho", "fisheye"]] = None,
@@ -538,12 +552,16 @@ class Runner:
             rasterize_mode = "antialiased" if self.cfg.antialiased else "classic"
         if camera_model is None:
             camera_model = self.cfg.camera_model
+        if render_bkg:
+            Nsqg = means.shape[0]
+        else:
+            Nsqg = self.superq.offsets.shape[0]
         render_colors, render_alphas, info = rasterization(
-            means=means,
-            quats=quats,
-            scales=scales,
-            opacities=opacities,
-            colors=colors,
+            means=means[:Nsqg],
+            quats=quats[:Nsqg],
+            scales=scales[:Nsqg],
+            opacities=opacities[:Nsqg],
+            colors=colors[:Nsqg],
             viewmats=torch.linalg.inv(camtoworlds),  # [C, 4, 4]
             Ks=Ks,  # [C, 3, 3]
             width=width,
@@ -1138,6 +1156,7 @@ class Runner:
             Ks=K[None],
             width=width,
             height=height,
+            render_bkg=render_tab_state.render_bkg,
             sh_degree=min(render_tab_state.max_sh_degree, self.cfg.sh_degree),
             near_plane=render_tab_state.near_plane,
             far_plane=render_tab_state.far_plane,
