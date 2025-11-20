@@ -486,6 +486,7 @@ class Runner:
         width: int,
         height: int,
         masks: Optional[Tensor] = None,
+        visualize_points: bool = False,
         rasterize_mode: Optional[Literal["classic", "antialiased"]] = None,
         camera_model: Optional[Literal["pinhole", "ortho", "fisheye"]] = None,
         **kwargs,
@@ -514,11 +515,22 @@ class Runner:
             rasterize_mode = "antialiased" if self.cfg.antialiased else "classic"
         if camera_model is None:
             camera_model = self.cfg.camera_model
+
+        render_quats = quats
+        render_scales = scales
+        render_opacities = opacities
+        if visualize_points:
+            # Force all scales to be small and uniform (x=y=z=radius)
+            render_scales = torch.full_like(render_scales, 0.01)
+            render_quats = torch.zeros_like(render_quats)
+            render_quats[:, 0] = 1.0
+            render_opacities = torch.full_like(render_opacities, 1)
+
         render_colors, render_alphas, info = rasterization(
             means=means,
-            quats=quats,
-            scales=scales,
-            opacities=opacities,
+            quats=render_quats,
+            scales=render_scales,
+            opacities=render_opacities,
             colors=colors,
             viewmats=torch.linalg.inv(camtoworlds),  # [C, 4, 4]
             Ks=Ks,  # [C, 3, 3]
@@ -1112,6 +1124,7 @@ class Runner:
             Ks=K[None],
             width=width,
             height=height,
+            visualize_points=render_tab_state.visualize_points,
             sh_degree=min(render_tab_state.max_sh_degree, self.cfg.sh_degree),
             near_plane=render_tab_state.near_plane,
             far_plane=render_tab_state.far_plane,

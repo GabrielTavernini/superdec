@@ -22,6 +22,7 @@ class GsplatRenderTabState(RenderTabState):
     ] = "rgb"
     normalize_nearfar: bool = False
     render_bkg: bool = True
+    visualize_points: bool = False
     inverse: bool = False
     colormap: Literal[
         "turbo", "viridis", "magma", "inferno", "cividis", "gray"
@@ -171,6 +172,20 @@ class GsplatViewer(Viewer):
                         render_bkg_checkbox.value
                     )
                     self.rerender(_)
+                
+                visualize_points_checkbox = server.gui.add_checkbox(
+                    "Render as points",
+                    initial_value=self.render_tab_state.visualize_points,
+                    disabled=False,
+                    hint="Render gaussians as points.",
+                )
+
+                @visualize_points_checkbox.on_update
+                def _(_) -> None:
+                    self.render_tab_state.visualize_points = (
+                        visualize_points_checkbox.value
+                    )
+                    self.rerender(_)
 
                 normalize_nearfar_checkbox = server.gui.add_checkbox(
                     "Normalize Near/Far",
@@ -244,6 +259,7 @@ class GsplatViewer(Viewer):
                 "backgrounds_slider": backgrounds_slider,
                 "render_mode_dropdown": render_mode_dropdown,
                 "render_bkg_checkbox": render_bkg_checkbox,
+                "visualize_points_checkbox": visualize_points_checkbox,
                 "normalize_nearfar_checkbox": normalize_nearfar_checkbox,
                 "inverse_checkbox": inverse_checkbox,
                 "colormap_dropdown": colormap_dropdown,

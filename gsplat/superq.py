@@ -2,6 +2,7 @@ import torch
 import torch.nn as nn
 import numpy as np
 import open3d as o3d
+import math
 from typing import Optional
 
 from gsplat.strategy.ops import remove
@@ -13,8 +14,8 @@ class SuperQ(nn.Module):
     def __init__(
         self, 
         pred_handler: PredictionHandler,
-        num_pts_per_sq: int = 400,
-        num_pts_background: int = 10000,
+        target_pts_density: int = 2000,
+        num_pts_background: int = -1,
         negative_offset: bool = True,
         max_offset: float = 0.05,
         background_ply: Optional[str] = None,
@@ -37,15 +38,27 @@ class SuperQ(nn.Module):
         self.negative_offset = negative_offset
         self.max_offset = max_offset
 
-        S = self.sqscale.shape[0]
-        Ng = S * num_pts_per_sq
-        sampler = EqualDistanceSamplerSQ(n_samples=num_pts_per_sq, D_eta=0.05, D_omega=0.05)
-        etas, omegas = sampler.sample_on_batch(
+        # Calculate specific points per SQ
+        areas = self._estimate_surface_areas().detach().cpu().numpy()  # [S]
+        num_pts_per_sq_area_based = np.round(areas * target_pts_density).astype(int)
+        num_pts_per_sq_area_based[num_pts_per_sq_area_based < 1000] = 1000
+        print(f"Sampling {np.sum(num_pts_per_sq_area_based)} total points. Min: {num_pts_per_sq_area_based.min()}, Max: {num_pts_per_sq_area_based.max()}")
+
+        max_samples = int(np.max(num_pts_per_sq_area_based))
+        sampler = EqualDistanceSamplerSQ(n_samples=max_samples, D_eta=0.05, D_omega=0.05)
+        raw_etas, raw_omegas = sampler.sample_on_batch(
             pred_handler.scale.astype(np.float32),
             pred_handler.exponents.astype(np.float32)
         )
-        etas = etas.reshape(-1, num_pts_per_sq)[self.mask].reshape(-1)
-        omegas = omegas.reshape(-1, num_pts_per_sq)[self.mask].reshape(-1)
+        raw_etas = raw_etas.reshape(-1, max_samples)[self.mask]
+        raw_omegas = raw_omegas.reshape(-1, max_samples)[self.mask]
+        
+        # filter out excess points
+        col_indices = np.arange(max_samples)[None, :]
+        required_counts = num_pts_per_sq_area_based[:, None]
+        valid_mask = col_indices < required_counts # [S, max_samples]
+        etas = raw_etas[valid_mask]
+        omegas = raw_omegas[valid_mask]
 
         # Make sure we don't get nan for gradients
         etas[etas == 0] += 1e-6
@@ -55,14 +68,20 @@ class SuperQ(nn.Module):
         self.register_buffer("etas", torch.tensor(etas, device=device))
         self.register_buffer("omegas", torch.tensor(omegas, device=device))
         # sq_idx tells us which Superquadric each point belongs to.
-        self.register_buffer("sq_idx", torch.arange(S, device=device).repeat_interleave(num_pts_per_sq))
-        self.offsets = torch.zeros(Ng, 3, device=device)
+        sq_idx_tensor = torch.repeat_interleave(
+            torch.arange(self.sqscale.shape[0], device=device), 
+            torch.tensor(num_pts_per_sq_area_based, device=device)
+        )
+        self.register_buffer("sq_idx", sq_idx_tensor)
+        self.offsets = torch.zeros(etas.shape[0], 3, device=device)
 
         if background_ply is not None:
             pcd = o3d.io.read_point_cloud(background_ply)
             points_np = np.asarray(pcd.points)
-            idx = np.random.choice(points_np.shape[0], num_pts_background, replace=False)
-            self.background = torch.tensor(points_np[idx], device=device).float()
+            if num_pts_background != -1:
+                idx = np.random.choice(points_np.shape[0], num_pts_background, replace=False)
+                points_np = points_np[idx]
+            self.background = torch.tensor(points_np, device=device).float()
         else:
             self.background = self._create_background(num_pts_background)
 
@@ -136,9 +155,6 @@ class SuperQ(nn.Module):
 
             min_rot = torch.min(transformed_points, dim=0).values
             max_rot = torch.max(transformed_points, dim=0).values
-
-            # 1. Sample on the local Axis-Aligned Box
-            # We reuse the AABB sampling logic here
             lengths = max_rot - min_rot
             
             # Calculate face areas for weighting
@@ -160,14 +176,8 @@ class SuperQ(nn.Module):
             rows = torch.arange(num_samples, device=self.etas.device)
             u[rows, fixed_axes] = is_max.float()
             
-            # Scale to local dimensions (this gives us points in the OBB's local frame)
             points_local = u * lengths + min_rot
-            
-            # 2. Transform back to World Space
-            # Formula: P_world = P_local @ Rotation_Inverse + Translation
-            # Since Rotation is orthogonal, Inverse == Transpose
             points_world = torch.matmul(points_local, eigenvectors.T) + mean
-            
             return points_world
 
     def _compute_means(self):
@@ -210,3 +220,84 @@ class SuperQ(nn.Module):
             offset_val = torch.sigmoid(self.offsets) * self.max_offset  
         global_pos += offset_val
         return torch.cat((global_pos, self.background), 0)
+
+    def _estimate_surface_areas(self, n_samples: int = 2048) -> torch.Tensor:
+        """
+        Numerically estimate surface area for each SQ by sampling (eta, omega)
+        and computing mean |dX/deta x dX/domega| * domain_area.
+
+        Domain: eta in [-pi/2, pi/2] (length pi), omega in [-pi, pi] (length 2pi).
+        Domain area = pi * 2pi = 2 * pi^2
+        """
+        device = self.sqscale.device
+        S = self.sqscale.shape[0]
+
+        # random param samples (uniform over domain)
+        eta = (torch.rand(n_samples, device=device) - 0.5) * math.pi      # in [-pi/2, pi/2]
+        omega = (torch.rand(n_samples, device=device) - 0.5) * 2 * math.pi  # in [-pi, pi]
+
+        # Expand to (S, n_samples)
+        eta = eta.unsqueeze(0).expand(S, n_samples)     # [S, n_samples]
+        omega = omega.unsqueeze(0).expand(S, n_samples) # [S, n_samples]
+
+        a1 = self.sqscale[:, 0].unsqueeze(1)  # [S,1]
+        a2 = self.sqscale[:, 1].unsqueeze(1)
+        a3 = self.sqscale[:, 2].unsqueeze(1)
+        e1 = self.exponents[:, 0].unsqueeze(1)
+        e2 = self.exponents[:, 1].unsqueeze(1)
+
+        cos_eta = torch.cos(eta)
+        sin_eta = torch.sin(eta)
+        cos_omega = torch.cos(omega)
+        sin_omega = torch.sin(omega)
+
+        # base param functions
+        t1 = self.fexp(cos_eta, e1)   # [S, n]
+        t2 = self.fexp(sin_eta, e1)
+        fcos = self.fexp(cos_omega, e2)
+        fsin = self.fexp(sin_omega, e2)
+
+        # derivatives of fexp:
+        # df/dx for f(x)=sign(x)*|x|^p is p * |x|^(p-1)
+        # then dx/deta for cos_eta is -sin_eta, for sin_eta is cos_eta, for cos_omega -> -sin_omega, for sin_omega -> cos_omega
+        # note shapes broadcast correctly
+        df_dcos_eta = e1 * (torch.abs(cos_eta) ** (e1 - 1))
+        dt1_deta = df_dcos_eta * (-sin_eta)
+
+        df_dsin_eta = e1 * (torch.abs(sin_eta) ** (e1 - 1))
+        dt2_deta = df_dsin_eta * cos_eta
+
+        df_dcos_omega = e2 * (torch.abs(cos_omega) ** (e2 - 1))
+        dfcos_domega = df_dcos_omega * (-sin_omega)
+
+        df_dsin_omega = e2 * (torch.abs(sin_omega) ** (e2 - 1))
+        dfsin_domega = df_dsin_omega * cos_omega
+
+        # partial derivatives of param surface
+        # x = a1 * t1 * fcos
+        # y = a2 * t1 * fsin
+        # z = a3 * t2
+
+        rx_eta = a1 * dt1_deta * fcos
+        rx_omega = a1 * t1 * dfcos_domega
+
+        ry_eta = a2 * dt1_deta * fsin
+        ry_omega = a2 * t1 * dfsin_domega
+
+        rz_eta = a3 * dt2_deta
+        rz_omega = torch.zeros_like(rz_eta)
+
+        # dX/deta = (rx_eta, ry_eta, rz_eta)
+        # dX/domega = (rx_omega, ry_omega, 0)
+        # cross product:
+        cx = ry_eta * rz_omega - rz_eta * ry_omega
+        cy = rz_eta * rx_omega - rx_eta * rz_omega
+        cz = rx_eta * ry_omega - ry_eta * rx_omega
+
+        # magnitude
+        mag = torch.sqrt(cx * cx + cy * cy + cz * cz + 1e-12)  # [S, n_samples]
+
+        mean_mag = torch.mean(mag, dim=1)  # [S]
+        domain_area = 2.0 * (math.pi ** 2)  # pi * 2pi
+        areas = mean_mag * domain_area
+        return areas

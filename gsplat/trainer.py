@@ -46,11 +46,11 @@ class Config:
     scene_id: str = "3f1e1610de"
 
     # New configs
-    num_pts_per_sq: int = 5000
+    target_pts_density: int = 2500
     pred_npz: str = f"data/output_npz/{scene_id}.npz"
     
     # Superq background
-    num_pts_background: int = 100000
+    num_pts_background: int = 50_000 # -1 will use all pointcloud points
     background_ply: Optional[str] = f"data/scannetpp_v2_backgrounds/{scene_id}_mesh_cropped.ply"
 
     # Disable viewer
@@ -212,7 +212,7 @@ class Config:
 def create_splats_with_optimizers(
     parser: Parser,
     pred_handler: PredictionHandler,
-    num_pts_per_sq: int = 400,
+    target_pts_density: int = 2000,
     num_pts_background: int = 10000,
     background_ply: Optional[str] = None,
     init_opacity: float = 0.1,
@@ -235,7 +235,7 @@ def create_splats_with_optimizers(
 ) -> Tuple[torch.nn.ParameterDict, Dict[str, torch.optim.Optimizer]]:
     superq = SuperQ(
         pred_handler, 
-        num_pts_per_sq, 
+        target_pts_density, 
         num_pts_background, 
         background_ply=background_ply,
         device=device
@@ -368,7 +368,7 @@ class Runner:
         self.splats, self.optimizers, self.superq, self.superq_optimizers = create_splats_with_optimizers(
             self.parser,
             self.pred_handler,
-            num_pts_per_sq=cfg.num_pts_per_sq,
+            target_pts_density=cfg.target_pts_density,
             num_pts_background=cfg.num_pts_background,
             background_ply=cfg.background_ply,
             init_opacity=cfg.init_opa,
@@ -523,6 +523,7 @@ class Runner:
         width: int,
         height: int,
         render_bkg: bool = True,
+        visualize_points: bool = False,
         masks: Optional[Tensor] = None,
         rasterize_mode: Optional[Literal["classic", "antialiased"]] = None,
         camera_model: Optional[Literal["pinhole", "ortho", "fisheye"]] = None,
@@ -556,11 +557,22 @@ class Runner:
             Nsqg = means.shape[0]
         else:
             Nsqg = self.superq.offsets.shape[0]
+        
+        render_quats = quats[:Nsqg]
+        render_scales = scales[:Nsqg]
+        render_opacities = opacities[:Nsqg]
+        if visualize_points:
+            # Force all scales to be small and uniform (x=y=z=radius)
+            render_scales = torch.full_like(render_scales, 0.01)
+            render_quats = torch.zeros_like(render_quats)
+            render_quats[:, 0] = 1.0
+            render_opacities = torch.full_like(render_opacities, 1)
+
         render_colors, render_alphas, info = rasterization(
             means=means[:Nsqg],
-            quats=quats[:Nsqg],
-            scales=scales[:Nsqg],
-            opacities=opacities[:Nsqg],
+            quats=render_quats[:Nsqg],
+            scales=render_scales[:Nsqg],
+            opacities=render_opacities[:Nsqg],
             colors=colors[:Nsqg],
             viewmats=torch.linalg.inv(camtoworlds),  # [C, 4, 4]
             Ks=Ks,  # [C, 3, 3]
@@ -1157,6 +1169,7 @@ class Runner:
             width=width,
             height=height,
             render_bkg=render_tab_state.render_bkg,
+            visualize_points=render_tab_state.visualize_points,
             sh_degree=min(render_tab_state.max_sh_degree, self.cfg.sh_degree),
             near_plane=render_tab_state.near_plane,
             far_plane=render_tab_state.far_plane,
