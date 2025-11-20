@@ -52,7 +52,7 @@ class Config:
     render_traj_path: str = "interp"
 
     # Path to the Mip-NeRF 360 dataset
-    data_dir: str = "data/scenes/3f1e1610de/dslr"
+    data_dir: str = "data/3f1e1610de/dslr"
     # Downsample factor for the dataset
     data_factor: int = 4
     # Directory to save results
@@ -66,7 +66,7 @@ class Config:
     # Normalize the world space
     normalize_world_space: bool = True
     # Camera model
-    camera_model: Literal["pinhole", "ortho", "fisheye"] = "pinhole"
+    camera_model: Literal["pinhole", "ortho", "fisheye"] = "fisheye"
 
     # Port for the viewer server
     port: int = 8080

@@ -43,14 +43,14 @@ from superdec.utils.predictions_handler import PredictionHandler
 
 @dataclass
 class Config:
-    scene_id: str = "00a231a370"
+    scene_id: str = "3f1e1610de"
 
     # New configs
-    num_pts_per_sq: int = 1000
+    num_pts_per_sq: int = 5000
     pred_npz: str = f"data/output_npz/{scene_id}.npz"
     
     # Superq background
-    num_pts_background: int = 50000
+    num_pts_background: int = 100000
     background_ply: Optional[str] = f"data/scannetpp_v2_backgrounds/{scene_id}_mesh_cropped.ply"
 
     # Disable viewer
@@ -77,7 +77,7 @@ class Config:
     # Normalize the world space
     # normalize_world_space: bool = False
     # Camera model
-    camera_model: Literal["pinhole", "ortho", "fisheye"] = "pinhole"
+    camera_model: Literal["pinhole", "ortho", "fisheye"] = "fisheye"
 
     # Port for the viewer server
     port: int = 8080
@@ -137,7 +137,7 @@ class Config:
     bkgd_color: List[float] = field(default_factory=lambda: [255.0, 255.0, 255.0])
 
     # LR for 3D point positions
-    means_lr: float = 5e-4#1.6e-4
+    means_lr: float = 1.6e-4
     # LR for Gaussian scale factors
     scales_lr: float = 5e-3
     # LR for alpha blending weights
