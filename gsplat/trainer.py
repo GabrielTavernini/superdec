@@ -44,8 +44,9 @@ from superdec.utils.predictions_handler import PredictionHandler
 @dataclass
 class Config:
     # New configs
-    num_pts_per_sq: int = 2000
-    pred_npz: str = "data/output_npz/3f1e1610de.npz"
+    num_pts_per_sq: int = 1000
+    num_pts_background: int = 50000
+    pred_npz: str = "data/output_npz/00a231a370.npz"
 
     # Disable viewer
     disable_viewer: bool = False
@@ -57,11 +58,11 @@ class Config:
     render_traj_path: str = "interp"
 
     # Path to the Mip-NeRF 360 dataset
-    data_dir: str = "data/3f1e1610de/dslr/"
+    data_dir: str = "data/00a231a370/dslr/"
     # Downsample factor for the dataset
     # data_factor: int = 4
     # Directory to save results
-    result_dir: str = "results/3f1e1610de"
+    result_dir: str = "results/00a231a370_exp"
     # Every N images there is a test image
     test_every: int = 8
     # Random crop size for training  (experimental)
@@ -84,9 +85,9 @@ class Config:
     # Number of training steps
     max_steps: int = 30_000
     # Steps to evaluate the model
-    eval_steps: List[int] = field(default_factory=lambda: [10, 3_000, 7_000, 30_000])
+    eval_steps: List[int] = field(default_factory=lambda: [3_000, 7_000, 30_000])
     # Steps to save the model
-    save_steps: List[int] = field(default_factory=lambda: [10, 3_000, 7_000, 30_000])
+    save_steps: List[int] = field(default_factory=lambda: [3_000, 7_000, 30_000])
     # Whether to save superq file
     save_superq: bool = True
     # Whether to save ply file (storage size can be large)
@@ -207,6 +208,7 @@ def create_splats_with_optimizers(
     parser: Parser,
     pred_handler: PredictionHandler,
     num_pts_per_sq: int = 400,
+    num_pts_background: int = 10000,
     init_opacity: float = 0.1,
     init_scale: float = 1.0,
     means_lr: float = 1.6e-4,
@@ -225,7 +227,7 @@ def create_splats_with_optimizers(
     world_rank: int = 0,
     world_size: int = 1,
 ) -> Tuple[torch.nn.ParameterDict, Dict[str, torch.optim.Optimizer]]:
-    superq = SuperQ(pred_handler, num_pts_per_sq, device=device)
+    superq = SuperQ(pred_handler, num_pts_per_sq, num_pts_background, device=device)
     with torch.no_grad():
         points = superq()
 
@@ -355,6 +357,7 @@ class Runner:
             self.parser,
             self.pred_handler,
             num_pts_per_sq=cfg.num_pts_per_sq,
+            num_pts_background=cfg.num_pts_background,
             init_opacity=cfg.init_opa,
             init_scale=cfg.init_scale,
             means_lr=cfg.means_lr,

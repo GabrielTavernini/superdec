@@ -2,6 +2,8 @@ import torch
 import torch.nn as nn
 import numpy as np
 
+from gsplat.strategy.ops import remove
+
 from superdec.loss.sampler import EqualDistanceSamplerSQ
 from superdec.utils.predictions_handler import PredictionHandler
 
@@ -10,13 +12,14 @@ class SuperQ(nn.Module):
         self, 
         pred_handler: PredictionHandler,
         num_pts_per_sq: int = 400,
+        num_pts_background: int = 10000,
         negative_offset: bool = True,
         max_offset: float = 0.05,
         device: str = "cuda",
     ):
         # Anything self.x = nn.Parameter(...) is trainable
-        trainable = ["offsets", "sqscale", "exponents", "translation", "rotation"]
-        # trainable = ["offsets"]
+        # trainable = ["background", "offsets", "sqscale", "exponents", "translation", "rotation"]
+        trainable = ["background", "offsets"]
 
         super().__init__()
         self.mask = (pred_handler.exist > 0.5).reshape(-1)
@@ -50,7 +53,9 @@ class SuperQ(nn.Module):
         self.register_buffer("omegas", torch.tensor(omegas, device=device))
         # sq_idx tells us which Superquadric each point belongs to.
         self.register_buffer("sq_idx", torch.arange(S, device=device).repeat_interleave(num_pts_per_sq))
-        self.offsets = torch.rand(Ng, 3, device=device)
+        self.offsets = torch.zeros(Ng, 3, device=device)
+
+        self.background = self._create_background(num_pts_background)
 
         # Turn selected attributes into trainable parameters
         for name in trainable:
@@ -62,22 +67,39 @@ class SuperQ(nn.Module):
             raise RuntimeError("Checkpoint missing 'offsets' key.")
             
         saved_Ng = state_dict["offsets"].shape[0]
+        saved_background_Ng = state_dict["background"].shape[0]
         current_Ng = self.offsets.shape[0]
+        current_background_Ng = self.background.shape[0]
 
         print(f"Resizing model from {current_Ng} points to {saved_Ng} points to match checkpoint.")
+        print(f"Resizing background from {current_background_Ng} points to {saved_background_Ng} points to match checkpoint.")
 
+        self.background = nn.Parameter(torch.zeros(saved_background_Ng, 3, device=self.background.device))
         self.offsets = nn.Parameter(torch.zeros(saved_Ng, 3, device=self.offsets.device))
         self.sq_idx = torch.zeros(saved_Ng, dtype=torch.long, device=self.sq_idx.device)
         self.etas = torch.zeros(saved_Ng, device=self.etas.device)
         self.omegas = torch.zeros(saved_Ng, device=self.omegas.device)
         
         self.load_state_dict(state_dict, strict=True)
+    
+    def _prune_parameter(self, is_prune, optimizers, param_name):
+        tmp_dict = {param_name: getattr(self, param_name)}
+        remove(
+            params=tmp_dict, 
+            optimizers={param_name: optimizers[param_name]}, 
+            state={}, 
+            mask=is_prune
+        )
+        setattr(self, param_name, tmp_dict[param_name])
 
-    def prune_gs(self, is_prune):
-        # offsets are pruned in the strat
-        self.etas = self.etas[~is_prune]
-        self.omegas = self.omegas[~is_prune]
-        self.sq_idx = self.sq_idx[~is_prune]
+    def prune_gs(self, is_prune, optimizers):
+        Ng = self.offsets.shape[0]
+        self._prune_parameter(is_prune[:Ng], optimizers, "offsets")
+        self._prune_parameter(is_prune[Ng:], optimizers, "background")
+
+        self.etas = self.etas[~is_prune[:Ng]]
+        self.omegas = self.omegas[~is_prune[:Ng]]
+        self.sq_idx = self.sq_idx[~is_prune[:Ng]]
 
     def update_handler(self):
         batch_size = self.pred_handler.scale.shape[1]
@@ -92,7 +114,54 @@ class SuperQ(nn.Module):
     def fexp(self, x, p):
         return torch.sign(x)*(torch.abs(x)**p)
 
-    def forward(self):
+    def _create_background(self, num_samples):
+        with torch.no_grad():
+            points = self._compute_means()
+            mean = torch.mean(points, dim=0)
+            centered_points = points - mean
+
+            # Eigenvectors represent the rotation matrix of the obb
+            covariance = torch.matmul(centered_points.T, centered_points) / (points.shape[0] - 1)
+            eigenvalues, eigenvectors = torch.linalg.eigh(covariance)
+            transformed_points = torch.matmul(centered_points, eigenvectors)
+
+            min_rot = torch.min(transformed_points, dim=0).values
+            max_rot = torch.max(transformed_points, dim=0).values
+
+            # 1. Sample on the local Axis-Aligned Box
+            # We reuse the AABB sampling logic here
+            lengths = max_rot - min_rot
+            
+            # Calculate face areas for weighting
+            areas = torch.tensor([
+                lengths[1] * lengths[2], # Face perp to Local X
+                lengths[0] * lengths[2], # Face perp to Local Y
+                lengths[0] * lengths[1]  # Face perp to Local Z
+            ])
+            
+            # Pick axes based on area weights
+            probs = areas / areas.sum()
+            fixed_axes = torch.multinomial(probs, num_samples, replacement=True)
+            
+            # Generate random points [0,1]
+            u = torch.rand(num_samples, 3, device=self.etas.device)
+            
+            # Snap fixed axis to 0 or 1
+            is_max = torch.randint(0, 2, (num_samples,), device=self.etas.device).bool()
+            rows = torch.arange(num_samples, device=self.etas.device)
+            u[rows, fixed_axes] = is_max.float()
+            
+            # Scale to local dimensions (this gives us points in the OBB's local frame)
+            points_local = u * lengths + min_rot
+            
+            # 2. Transform back to World Space
+            # Formula: P_world = P_local @ Rotation_Inverse + Translation
+            # Since Rotation is orthogonal, Inverse == Transpose
+            points_world = torch.matmul(points_local, eigenvectors.T) + mean
+            
+            return points_world
+
+    def _compute_means(self):
         # Make sure that all tensors have the right shape
         current_scale = self.sqscale[self.sq_idx]       # [Ng, 3]
         current_exps = self.exponents[self.sq_idx]      # [Ng, 2]
@@ -121,10 +190,14 @@ class SuperQ(nn.Module):
 
         rotated_pos = torch.bmm(current_rot, local_pos.unsqueeze(-1)).squeeze(-1)        
         global_pos = rotated_pos + current_trans
+        return global_pos
+
+    def forward(self):
+        global_pos = self._compute_means()
 
         if self.negative_offset:
             offset_val = torch.tanh(self.offsets) * self.max_offset
         else:
-            offset_val = torch.sigmoid(self.offsets) * self.max_offset        
+            offset_val = torch.sigmoid(self.offsets) * self.max_offset  
         global_pos += offset_val
-        return global_pos
+        return torch.cat((global_pos, self.background), 0)

@@ -337,14 +337,11 @@ class SuperStrategy(Strategy):
             if step < self.refine_scale2d_stop_iter:
                 is_too_big |= state["radii"] > self.prune_scale2d
 
-            is_prune = is_prune #| is_too_big
+            is_prune = is_prune | is_too_big
 
         n_prune = is_prune.sum().item()
         if n_prune > 0:
             remove(params=params, optimizers=optimizers, state=state, mask=is_prune)
-            tmp_dict = {'offsets': superq.offsets}
-            remove(params=tmp_dict, optimizers={'offsets': superq_optimizers['offsets']}, state={}, mask=is_prune)
-            superq.offsets = tmp_dict['offsets']
-            superq.prune_gs(is_prune)
+            superq.prune_gs(is_prune, superq_optimizers)
 
         return n_prune
