@@ -46,8 +46,8 @@ class Config:
     scene_id: str = "3f1e1610de"
 
     # New configs
-    target_pts_density: int = 5000
-    min_pts_per_sq: int = 1000
+    target_pts_density: int = 1
+    min_pts_per_sq: int = 3000
     pred_npz: str = f"data/output_npz/{scene_id}.npz"
     
     # Superq background
@@ -68,7 +68,7 @@ class Config:
     # Downsample factor for the dataset
     # data_factor: int = 4
     # Directory to save results
-    result_dir: str = f"results/{scene_id}_grow"
+    result_dir: str = f"results/{scene_id}_exp"
     # Every N images there is a test image
     test_every: int = 8
     # Random crop size for training  (experimental)
@@ -317,7 +317,6 @@ def create_splats_with_optimizers(
             betas=(1 - BS * (1 - 0.9), 1 - BS * (1 - 0.999)),
         ) for name, param in superq.named_parameters()
     }
-    print(superq_optimizers['background'])
     return splats, optimizers, superq, superq_optimizers
 
 
