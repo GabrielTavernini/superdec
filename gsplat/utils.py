@@ -2,6 +2,8 @@ import random
 
 import numpy as np
 import torch
+import math
+import SuperQ
 from sklearn.neighbors import NearestNeighbors
 from torch import Tensor
 import torch.nn.functional as F
@@ -113,6 +115,86 @@ class AppearanceOptModule(torch.nn.Module):
         colors = self.color_head(h)
         return colors
 
+def estimate_sq_surface_areas(superq: SuperQ, n_samples: int = 2048) -> torch.Tensor:
+    """
+    Numerically estimate surface area for each SQ by sampling (eta, omega)
+    and computing mean |dX/deta x dX/domega| * domain_area.
+
+    Domain: eta in [-pi/2, pi/2] (length pi), omega in [-pi, pi] (length 2pi).
+    Domain area = pi * 2pi = 2 * pi^2
+    """
+    device = superq.sqscale.device
+    S = superq.sqscale.shape[0]
+
+    # random param samples (uniform over domain)
+    eta = (torch.rand(n_samples, device=device) - 0.5) * math.pi      # in [-pi/2, pi/2]
+    omega = (torch.rand(n_samples, device=device) - 0.5) * 2 * math.pi  # in [-pi, pi]
+
+    # Expand to (S, n_samples)
+    eta = eta.unsqueeze(0).expand(S, n_samples)     # [S, n_samples]
+    omega = omega.unsqueeze(0).expand(S, n_samples) # [S, n_samples]
+
+    a1 = superq.sqscale[:, 0].unsqueeze(1)  # [S,1]
+    a2 = superq.sqscale[:, 1].unsqueeze(1)
+    a3 = superq.sqscale[:, 2].unsqueeze(1)
+    e1 = superq.exponents[:, 0].unsqueeze(1)
+    e2 = superq.exponents[:, 1].unsqueeze(1)
+
+    cos_eta = torch.cos(eta)
+    sin_eta = torch.sin(eta)
+    cos_omega = torch.cos(omega)
+    sin_omega = torch.sin(omega)
+
+    # base param functions
+    t1 = superq.fexp(cos_eta, e1)   # [S, n]
+    t2 = superq.fexp(sin_eta, e1)
+    fcos = superq.fexp(cos_omega, e2)
+    fsin = superq.fexp(sin_omega, e2)
+
+    # derivatives of fexp:
+    # df/dx for f(x)=sign(x)*|x|^p is p * |x|^(p-1)
+    # then dx/deta for cos_eta is -sin_eta, for sin_eta is cos_eta, for cos_omega -> -sin_omega, for sin_omega -> cos_omega
+    # note shapes broadcast correctly
+    df_dcos_eta = e1 * (torch.abs(cos_eta) ** (e1 - 1))
+    dt1_deta = df_dcos_eta * (-sin_eta)
+
+    df_dsin_eta = e1 * (torch.abs(sin_eta) ** (e1 - 1))
+    dt2_deta = df_dsin_eta * cos_eta
+
+    df_dcos_omega = e2 * (torch.abs(cos_omega) ** (e2 - 1))
+    dfcos_domega = df_dcos_omega * (-sin_omega)
+
+    df_dsin_omega = e2 * (torch.abs(sin_omega) ** (e2 - 1))
+    dfsin_domega = df_dsin_omega * cos_omega
+
+    # partial derivatives of param surface
+    # x = a1 * t1 * fcos
+    # y = a2 * t1 * fsin
+    # z = a3 * t2
+
+    rx_eta = a1 * dt1_deta * fcos
+    rx_omega = a1 * t1 * dfcos_domega
+
+    ry_eta = a2 * dt1_deta * fsin
+    ry_omega = a2 * t1 * dfsin_domega
+
+    rz_eta = a3 * dt2_deta
+    rz_omega = torch.zeros_like(rz_eta)
+
+    # dX/deta = (rx_eta, ry_eta, rz_eta)
+    # dX/domega = (rx_omega, ry_omega, 0)
+    # cross product:
+    cx = ry_eta * rz_omega - rz_eta * ry_omega
+    cy = rz_eta * rx_omega - rx_eta * rz_omega
+    cz = rx_eta * ry_omega - ry_eta * rx_omega
+
+    # magnitude
+    mag = torch.sqrt(cx * cx + cy * cy + cz * cz + 1e-12)  # [S, n_samples]
+
+    mean_mag = torch.mean(mag, dim=1)  # [S]
+    domain_area = 2.0 * (math.pi ** 2)  # pi * 2pi
+    areas = mean_mag * domain_area
+    return areas
 
 def rotation_6d_to_matrix(d6: Tensor) -> Tensor:
     """

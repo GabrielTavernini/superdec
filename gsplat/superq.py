@@ -5,6 +5,7 @@ import open3d as o3d
 import math
 from typing import Optional
 
+from utils import estimate_sq_surface_areas
 from gsplat.strategy.ops import remove
 
 from superdec.loss.sampler import EqualDistanceSamplerSQ
@@ -39,7 +40,7 @@ class SuperQ(nn.Module):
         self.max_offset = max_offset
 
         # Calculate specific points per SQ
-        areas = self._estimate_surface_areas().detach().cpu().numpy()  # [S]
+        areas = estimate_sq_surface_areas(self).detach().cpu().numpy()  # [S]
         num_pts_per_sq_area_based = np.round(areas * target_pts_density).astype(int)
         num_pts_per_sq_area_based[num_pts_per_sq_area_based < 1000] = 1000
         print(f"Sampling {np.sum(num_pts_per_sq_area_based)} total points. Min: {num_pts_per_sq_area_based.min()}, Max: {num_pts_per_sq_area_based.max()}")
@@ -110,24 +111,34 @@ class SuperQ(nn.Module):
         
         self.load_state_dict(state_dict, strict=True)
     
-    def _prune_parameter(self, is_prune, optimizers, param_name):
-        tmp_dict = {param_name: getattr(self, param_name)}
-        remove(
-            params=tmp_dict, 
-            optimizers={param_name: optimizers[param_name]}, 
-            state={}, 
-            mask=is_prune
-        )
-        setattr(self, param_name, tmp_dict[param_name])
+    def densify_buffers(self, mask, split = False):
+        """
+        Duplicates buffers for SuperQ points based on the mask.
+        n_clones: 1 for duplication, 2 for splitting.
+        """
+        n_clones = 2 if split else 1
+        new_etas = self.etas[mask].repeat_interleave(n_clones)
+        new_omegas = self.omegas[mask].repeat_interleave(n_clones)
+        new_sq_idx = self.sq_idx[mask].repeat_interleave(n_clones)
+        
+        if split:
+            rest = ~mask
+        else:
+            rest = torch.ones(self.etas.shape[0], dtype=torch.bool)
+        self.etas = torch.cat([self.etas[rest], new_etas])
+        self.omegas = torch.cat([self.omegas[rest], new_omegas])
+        self.sq_idx = torch.cat([self.sq_idx[rest], new_sq_idx])
 
-    def prune_gs(self, is_prune, optimizers):
+    def prune_buffers(self, is_prune):
+        Ng, _ = self.get_counts()
+        self.etas = self.etas[~is_prune]
+        self.omegas = self.omegas[~is_prune]
+        self.sq_idx = self.sq_idx[~is_prune]
+        
+    def get_counts(self):
         Ng = self.offsets.shape[0]
-        self._prune_parameter(is_prune[:Ng], optimizers, "offsets")
-        self._prune_parameter(is_prune[Ng:], optimizers, "background")
-
-        self.etas = self.etas[~is_prune[:Ng]]
-        self.omegas = self.omegas[~is_prune[:Ng]]
-        self.sq_idx = self.sq_idx[~is_prune[:Ng]]
+        Nbg = self.background.shape[0]
+        return Ng, Nbg
 
     def update_handler(self):
         batch_size = self.pred_handler.scale.shape[1]
@@ -220,84 +231,3 @@ class SuperQ(nn.Module):
             offset_val = torch.sigmoid(self.offsets) * self.max_offset  
         global_pos += offset_val
         return torch.cat((global_pos, self.background), 0)
-
-    def _estimate_surface_areas(self, n_samples: int = 2048) -> torch.Tensor:
-        """
-        Numerically estimate surface area for each SQ by sampling (eta, omega)
-        and computing mean |dX/deta x dX/domega| * domain_area.
-
-        Domain: eta in [-pi/2, pi/2] (length pi), omega in [-pi, pi] (length 2pi).
-        Domain area = pi * 2pi = 2 * pi^2
-        """
-        device = self.sqscale.device
-        S = self.sqscale.shape[0]
-
-        # random param samples (uniform over domain)
-        eta = (torch.rand(n_samples, device=device) - 0.5) * math.pi      # in [-pi/2, pi/2]
-        omega = (torch.rand(n_samples, device=device) - 0.5) * 2 * math.pi  # in [-pi, pi]
-
-        # Expand to (S, n_samples)
-        eta = eta.unsqueeze(0).expand(S, n_samples)     # [S, n_samples]
-        omega = omega.unsqueeze(0).expand(S, n_samples) # [S, n_samples]
-
-        a1 = self.sqscale[:, 0].unsqueeze(1)  # [S,1]
-        a2 = self.sqscale[:, 1].unsqueeze(1)
-        a3 = self.sqscale[:, 2].unsqueeze(1)
-        e1 = self.exponents[:, 0].unsqueeze(1)
-        e2 = self.exponents[:, 1].unsqueeze(1)
-
-        cos_eta = torch.cos(eta)
-        sin_eta = torch.sin(eta)
-        cos_omega = torch.cos(omega)
-        sin_omega = torch.sin(omega)
-
-        # base param functions
-        t1 = self.fexp(cos_eta, e1)   # [S, n]
-        t2 = self.fexp(sin_eta, e1)
-        fcos = self.fexp(cos_omega, e2)
-        fsin = self.fexp(sin_omega, e2)
-
-        # derivatives of fexp:
-        # df/dx for f(x)=sign(x)*|x|^p is p * |x|^(p-1)
-        # then dx/deta for cos_eta is -sin_eta, for sin_eta is cos_eta, for cos_omega -> -sin_omega, for sin_omega -> cos_omega
-        # note shapes broadcast correctly
-        df_dcos_eta = e1 * (torch.abs(cos_eta) ** (e1 - 1))
-        dt1_deta = df_dcos_eta * (-sin_eta)
-
-        df_dsin_eta = e1 * (torch.abs(sin_eta) ** (e1 - 1))
-        dt2_deta = df_dsin_eta * cos_eta
-
-        df_dcos_omega = e2 * (torch.abs(cos_omega) ** (e2 - 1))
-        dfcos_domega = df_dcos_omega * (-sin_omega)
-
-        df_dsin_omega = e2 * (torch.abs(sin_omega) ** (e2 - 1))
-        dfsin_domega = df_dsin_omega * cos_omega
-
-        # partial derivatives of param surface
-        # x = a1 * t1 * fcos
-        # y = a2 * t1 * fsin
-        # z = a3 * t2
-
-        rx_eta = a1 * dt1_deta * fcos
-        rx_omega = a1 * t1 * dfcos_domega
-
-        ry_eta = a2 * dt1_deta * fsin
-        ry_omega = a2 * t1 * dfsin_domega
-
-        rz_eta = a3 * dt2_deta
-        rz_omega = torch.zeros_like(rz_eta)
-
-        # dX/deta = (rx_eta, ry_eta, rz_eta)
-        # dX/domega = (rx_omega, ry_omega, 0)
-        # cross product:
-        cx = ry_eta * rz_omega - rz_eta * ry_omega
-        cy = rz_eta * rx_omega - rx_eta * rz_omega
-        cz = rx_eta * ry_omega - ry_eta * rx_omega
-
-        # magnitude
-        mag = torch.sqrt(cx * cx + cy * cy + cz * cz + 1e-12)  # [S, n_samples]
-
-        mean_mag = torch.mean(mag, dim=1)  # [S]
-        domain_area = 2.0 * (math.pi ** 2)  # pi * 2pi
-        areas = mean_mag * domain_area
-        return areas
