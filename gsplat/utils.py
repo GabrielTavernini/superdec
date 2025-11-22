@@ -3,7 +3,6 @@ import random
 import numpy as np
 import torch
 import math
-import SuperQ
 from sklearn.neighbors import NearestNeighbors
 from torch import Tensor
 import torch.nn.functional as F
@@ -115,7 +114,7 @@ class AppearanceOptModule(torch.nn.Module):
         colors = self.color_head(h)
         return colors
 
-def estimate_sq_surface_areas(superq: SuperQ, n_samples: int = 2048) -> torch.Tensor:
+def estimate_sq_surface_areas(superq, n_samples: int = 2048) -> torch.Tensor:
     """
     Numerically estimate surface area for each SQ by sampling (eta, omega)
     and computing mean |dX/deta x dX/domega| * domain_area.

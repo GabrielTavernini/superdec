@@ -77,8 +77,12 @@ class SuperStrategy(Strategy):
         ...     strategy.step_post_backward(params, optimizers, strategy_state, step, info)
 
     """
-
-    enable_prune: bool = True
+    prune_sq: bool = True
+    prune_bg: bool = True
+    dupli_sq: bool = False
+    dupli_bg: bool = False
+    split_sq: bool = False
+    split_bg: bool = False
     prune_opa: float = 0.005
     grow_grad2d: float = 0.0002
     grow_scale3d: float = 0.01
@@ -157,7 +161,6 @@ class SuperStrategy(Strategy):
         params: Union[Dict[str, torch.nn.Parameter], torch.nn.ParameterDict],
         optimizers: Dict[str, torch.optim.Optimizer],
         superq: SuperQ,
-        superq_params: Union[Dict[str, torch.nn.Parameter], torch.nn.ParameterDict],
         superq_optimizers: Dict[str, torch.optim.Optimizer],
         state: Dict[str, Any],
         step: int,
@@ -176,15 +179,16 @@ class SuperStrategy(Strategy):
             and step % self.reset_every >= self.pause_refine_after_reset
         ):
             # grow GSs
-            n_dupli, n_split = self._grow_gs(params, optimizers, superq, superq_params, superq_optimizers, state, step)
-            if self.verbose:
-                print(
-                    f"Step {step}: {n_dupli} GSs duplicated, {n_split} GSs split. "
-                    f"Now having {len(params['opacities'])} GSs."
-                )
+            if self.dupli_sq or self.dupli_bg or self.split_sq or self.split_bg:
+                n_dupli, n_split = self._grow_gs(params, optimizers, superq, superq_optimizers, state, step)
+                if self.verbose:
+                    print(
+                        f"Step {step}: {n_dupli} GSs duplicated, {n_split} GSs split. "
+                        f"Now having {len(params['opacities'])} GSs."
+                    )
 
             # prune GSs
-            if self.enable_prune:
+            if self.prune_sq or self.prune_bg:
                 n_prune = self._prune_gs(params, optimizers, superq, superq_optimizers, state, step)
                 if self.verbose:
                     print(
@@ -272,7 +276,6 @@ class SuperStrategy(Strategy):
         params: Union[Dict[str, torch.nn.Parameter], torch.nn.ParameterDict],
         optimizers: Dict[str, torch.optim.Optimizer],
         superq: SuperQ,
-        superq_params: Union[Dict[str, torch.nn.Parameter], torch.nn.ParameterDict],
         superq_optimizers: Dict[str, torch.optim.Optimizer],
         state: Dict[str, Any],
         step: int,
@@ -280,6 +283,7 @@ class SuperStrategy(Strategy):
         count = state["count"]
         grads = state["grad2d"] / count.clamp_min(1)
         device = grads.device
+        Ng, Ngbg = superq.get_counts()
 
         is_grad_high = grads > self.grow_grad2d
         is_small = (
@@ -287,12 +291,16 @@ class SuperStrategy(Strategy):
             <= self.grow_scale3d * state["scene_scale"]
         )
         is_dupli = is_grad_high & is_small
+        is_dupli[:Ng] &= self.dupli_sq
+        is_dupli[Ng:] &= self.dupli_bg
         n_dupli = is_dupli.sum().item()
 
         is_large = ~is_small
         is_split = is_grad_high & is_large
         if step < self.refine_scale2d_stop_iter:
             is_split |= state["radii"] > self.grow_scale2d
+        is_split[:Ng] &= self.split_sq
+        is_split[Ng:] &= self.split_bg
         n_split = is_split.sum().item()
 
         # first duplicate
@@ -301,7 +309,6 @@ class SuperStrategy(Strategy):
                 params=params, 
                 optimizers=optimizers, 
                 superq=superq,
-                superq_params=superq_params,
                 superq_optimizers=superq_optimizers,
                 state=state, 
                 mask=is_dupli
@@ -310,8 +317,10 @@ class SuperStrategy(Strategy):
         # new GSs added by duplication will not be split
         is_split = torch.cat(
             [
-                is_split,
-                torch.zeros(n_dupli, dtype=torch.bool, device=device),
+                is_split[:Ng],
+                torch.zeros(is_dupli[:Ng].sum().item(), dtype=torch.bool, device=device),
+                is_split[Ng:],
+                torch.zeros(is_dupli[Ng:].sum().item(), dtype=torch.bool, device=device),
             ]
         )
 
@@ -321,7 +330,6 @@ class SuperStrategy(Strategy):
                 params=params,
                 optimizers=optimizers,
                 superq=superq,
-                superq_params=superq_params,
                 superq_optimizers=superq_optimizers,
                 state=state,
                 mask=is_split,
@@ -339,6 +347,7 @@ class SuperStrategy(Strategy):
         state: Dict[str, Any],
         step: int,
     ) -> int:
+        Ng, _ = superq.get_counts()
         is_prune = torch.sigmoid(params["opacities"].flatten()) < self.prune_opa
         if step > self.reset_every:
             is_too_big = (
@@ -355,6 +364,8 @@ class SuperStrategy(Strategy):
 
             is_prune = is_prune | is_too_big
 
+        is_prune[:Ng] &= self.prune_sq
+        is_prune[Ng:] &= self.prune_bg
         n_prune = is_prune.sum().item()
         if n_prune > 0:
             remove(

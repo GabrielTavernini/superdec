@@ -16,13 +16,16 @@ class SuperQ(nn.Module):
         self, 
         pred_handler: PredictionHandler,
         target_pts_density: int = 2000,
+        min_pts_per_sq: int = 1000,
         num_pts_background: int = -1,
         negative_offset: bool = True,
         max_offset: float = 0.05,
         background_ply: Optional[str] = None,
+        move_on_sq: bool = False,
         device: str = "cuda",
     ):
         # Anything self.x = nn.Parameter(...) is trainable
+        # trainable = ["offsets_e", "offsets_o", "background", "offsets", "sqscale", "exponents", "translation", "rotation"]
         trainable = ["background", "offsets", "sqscale", "exponents", "translation", "rotation"]
         # trainable = ["background", "offsets"]
 
@@ -38,11 +41,12 @@ class SuperQ(nn.Module):
 
         self.negative_offset = negative_offset
         self.max_offset = max_offset
+        self.move_on_sq = move_on_sq
 
         # Calculate specific points per SQ
         areas = estimate_sq_surface_areas(self).detach().cpu().numpy()  # [S]
         num_pts_per_sq_area_based = np.round(areas * target_pts_density).astype(int)
-        num_pts_per_sq_area_based[num_pts_per_sq_area_based < 1000] = 1000
+        num_pts_per_sq_area_based[num_pts_per_sq_area_based < min_pts_per_sq] = min_pts_per_sq
         print(f"Sampling {np.sum(num_pts_per_sq_area_based)} total points. Min: {num_pts_per_sq_area_based.min()}, Max: {num_pts_per_sq_area_based.max()}")
 
         max_samples = int(np.max(num_pts_per_sq_area_based))
@@ -75,6 +79,10 @@ class SuperQ(nn.Module):
         )
         self.register_buffer("sq_idx", sq_idx_tensor)
         self.offsets = torch.zeros(etas.shape[0], 3, device=device)
+        if self.move_on_sq:
+            self.offsets_e = torch.zeros(etas.shape[0], device=device)
+            self.offsets_o = torch.zeros(etas.shape[0], device=device)
+            trainable_params.extend(["offsets_e", "offsets_o"])
 
         if background_ply is not None:
             pcd = o3d.io.read_point_cloud(background_ply)
@@ -90,6 +98,11 @@ class SuperQ(nn.Module):
         for name in trainable:
             val = getattr(self, name)
             setattr(self, name, nn.Parameter(val))
+        
+        self.trainable_params_sq = self.trainable_params(False)
+        self.trainable_params_bg = self.trainable_params(True)
+        print("Trainable superq-tied params:", self.trainable_params_sq)
+        print("Trainable background params:", self.trainable_params_bg)
 
     def load_dynamic_checkpoint(self, state_dict):
         if "offsets" not in state_dict:
@@ -110,16 +123,30 @@ class SuperQ(nn.Module):
         self.omegas = torch.zeros(saved_Ng, device=self.omegas.device)
         
         self.load_state_dict(state_dict, strict=True)
-    
+        
+    def update(self, params):
+        for k, v in params.items():
+            if isinstance(v, torch.Tensor):
+                setattr(self, k, params[k])
+
+    def trainable_params(self, background):
+        names = []
+        base = self.background if background else self.etas
+        params = dict(self.named_parameters())
+        for k, v in params.items():
+            if isinstance(v, torch.Tensor) and v.shape[0] == base.shape[0]:
+                names.append(k)
+        return names
+
     def densify_buffers(self, mask, split = False):
         """
         Duplicates buffers for SuperQ points based on the mask.
         n_clones: 1 for duplication, 2 for splitting.
         """
         n_clones = 2 if split else 1
-        new_etas = self.etas[mask].repeat_interleave(n_clones)
-        new_omegas = self.omegas[mask].repeat_interleave(n_clones)
-        new_sq_idx = self.sq_idx[mask].repeat_interleave(n_clones)
+        new_etas = self.etas[mask].repeat(n_clones)
+        new_omegas = self.omegas[mask].repeat(n_clones)
+        new_sq_idx = self.sq_idx[mask].repeat(n_clones)
         
         if split:
             rest = ~mask
@@ -130,11 +157,10 @@ class SuperQ(nn.Module):
         self.sq_idx = torch.cat([self.sq_idx[rest], new_sq_idx])
 
     def prune_buffers(self, is_prune):
-        Ng, _ = self.get_counts()
         self.etas = self.etas[~is_prune]
         self.omegas = self.omegas[~is_prune]
         self.sq_idx = self.sq_idx[~is_prune]
-        
+
     def get_counts(self):
         Ng = self.offsets.shape[0]
         Nbg = self.background.shape[0]
@@ -202,8 +228,13 @@ class SuperQ(nn.Module):
         a1, a2, a3 = current_scale[:, 0], current_scale[:, 1], current_scale[:, 2]
         e1, e2 = current_exps[:, 0], current_exps[:, 1]
 
-        cos_eta, sin_eta = torch.cos(self.etas), torch.sin(self.etas)
-        cos_omega, sin_omega = torch.cos(self.omegas), torch.sin(self.omegas)
+        etas = self.etas
+        omegas = self.omegas
+        if self.move_on_sq:
+            etas += self.offsets_e
+            omegas += self.offsets_o
+        cos_eta, sin_eta = torch.cos(etas), torch.sin(etas)
+        cos_omega, sin_omega = torch.cos(omegas), torch.sin(omegas)
 
         t1 = self.fexp(cos_eta, e1)
         t2 = self.fexp(sin_eta, e1)

@@ -3,37 +3,39 @@ from torch import Tensor
 from typing import Dict, Union, Callable, List, Tuple
 import torch.nn.functional as F
 
-import SuperQ
+from superq import SuperQ
 from gsplat.strategy.ops import _update_param_with_optimizer, remove, normalized_quat_to_rotmat
 
 @torch.no_grad()
 def duplicate(
     params: Union[Dict[str, torch.nn.Parameter], torch.nn.ParameterDict],
     optimizers: Dict[str, torch.optim.Optimizer],
-    superq_module: SuperQ,
-    superq_params: Dict[str, torch.nn.Parameter],
+    superq: SuperQ,
     superq_optimizers: Dict[str, torch.optim.Optimizer],
     mask: Tensor,
     state: Dict[str, Tensor]
 ):
-    Ng, _ = superq_module.get_counts()
+    Ng, _ = superq.get_counts()
+    superq_params = dict(superq.named_parameters())
     device = mask.device
     
     mask_sq, mask_bg = mask[:Ng], mask[Ng:]
-    n_dup_sq = mask_sq.sum()
-    n_dup_bg = mask_bg.sum()
+    n_dup_sq = mask_sq.sum().item()
+    n_dup_bg = mask_bg.sum().item()
+
+    def _duplicate_with_mask(mask, params, optimizers, names=None):
+        def p_fn(n, p): return torch.nn.Parameter(torch.cat([p, p[mask]]), requires_grad=True)
+        def o_fn(k, v): return torch.cat([v, torch.zeros((mask.sum().item(), *v.shape[1:]), device=device)])
+        _update_param_with_optimizer(p_fn, o_fn, params, optimizers, names=names)
 
     if n_dup_sq > 0:
-        superq_module.densify_buffers(mask_sq)
-
-        def p_fn_off(n, p): return torch.nn.Parameter(torch.cat([p, p[mask_sq]]), requires_grad=True)
-        def o_fn_off(k, v): return torch.cat([v, torch.zeros((n_dup_sq, *v.shape[1:]), device=device)])
-        _update_param_with_optimizer(p_fn_off, o_fn_off, superq_params, superq_optimizers, names=["offsets"])
+        superq.densify_buffers(mask_sq)
+        _duplicate_with_mask(mask_sq, superq_params, superq_optimizers, names=superq.trainable_params_sq)
 
     if n_dup_bg > 0:
-        def p_fn_bg(n, p): return torch.nn.Parameter(torch.cat([p, p[mask_bg]]), requires_grad=True)
-        def o_fn_bg(k, v): return torch.cat([v, torch.zeros((n_dup_bg, *v.shape[1:]), device=device)])
-        _update_param_with_optimizer(p_fn_bg, o_fn_bg, superq_params, superq_optimizers, names=["background"])
+        _duplicate_with_mask(mask_bg, superq_params, superq_optimizers, names=superq.trainable_params_bg)
+    
+    superq.update(superq_params)
 
     def param_fn_general(name: str, p: Tensor) -> Tensor:
         p_sq, p_bg = p[:Ng], p[Ng:]
@@ -63,17 +65,17 @@ def split(
     optimizers: Dict[str, torch.optim.Optimizer],
     state: Dict[str, Tensor],
     mask: Tensor,
-    superq_params: Dict[str, torch.nn.Parameter],
     superq_optimizers: Dict[str, torch.optim.Optimizer],
-    superq_module,
+    superq,
     revised_opacity: bool = False,
 ):
-    Ng, _ = superq_module.get_counts()
+    Ng, _ = superq.get_counts()
+    superq_params = dict(superq.named_parameters())
     device = mask.device
     
     mask_sq, mask_bg = mask[:Ng], mask[Ng:]
-    n_split_sq = mask_sq.sum()
-    n_split_bg = mask_bg.sum()
+    n_split_sq = mask_sq.sum().item()
+    n_split_bg = mask_bg.sum().item()
 
     def get_samples(param_scales, param_quats, mask):
         scales = torch.exp(param_scales[mask])
@@ -87,44 +89,34 @@ def split(
         )  # [2, N, 3]
         return samples
 
+    def _split_with_mask(mask, samples, params, optimizers, names=None):
+        def p_fn(n, p):
+            if len(p.shape) > 1 and p.shape[1] == 3:
+                p_split = (p[mask] + samples).reshape(-1, 3) # [2*N, 3]
+            else:
+                p_split = p[mask].repeat(2, *p.shape[1:])
+            return torch.nn.Parameter(torch.cat([p[~mask], p_split]), requires_grad=True)
+        def o_fn(k, v):
+            return torch.cat([v[~mask], torch.zeros((2 * mask.sum().item(), *v.shape[1:]), device=device)])
+        _update_param_with_optimizer(p_fn, o_fn, params, optimizers, names=names)
+
     if n_split_sq > 0:
-        superq_module.densify_buffers(mask_sq, split=True)
-
-    if n_split_bg > 0:
+        superq.densify_buffers(mask_sq, split=True)
         sq_samples = get_samples(params['scales'][:Ng], params['quats'][:Ng], mask_sq)
-        
-        def p_fn_off(n, p):
-            p_split = (p[mask_sq] + sq_samples).reshape(-1, 3) # [2*N, 3]
-            return torch.nn.Parameter(torch.cat([p[~mask_sq], p_split]), requires_grad=True)
-
-        def o_fn_off(k, v):
-            return torch.cat([v[~mask_sq], torch.zeros((2 * n_split_sq, *v.shape[1:]), device=device)])
-
-        _update_param_with_optimizer(p_fn_off, o_fn_off, superq_params, superq_optimizers, names=["offsets"])
+        _split_with_mask(mask_sq, sq_samples, superq_params, superq_optimizers, names=superq.trainable_params_sq)
 
     if n_split_bg > 0:
         bg_samples = get_samples(params['scales'][Ng:], params['quats'][Ng:], mask_bg)
-        
-        def p_fn_bg(n, p):
-            p_split = (p[mask_bg] + bg_samples).reshape(-1, 3)  # [2*N, 3]
-            return torch.nn.Parameter(torch.cat([p[~mask_bg], p_split]), requires_grad=True)
-            
-        def o_fn_bg(k, v):
-            return torch.cat([v[~mask_bg], torch.zeros((2 * n_split_bg, *v.shape[1:]), device=device)])
+        _split_with_mask(mask_bg, bg_samples, superq_params, superq_optimizers, names=superq.trainable_params_bg)
 
-        _update_param_with_optimizer(p_fn_bg, o_fn_bg, superq_params, superq_optimizers, names=["background"])
+    superq.update(superq_params)
 
-    # --- 4. Update General Params ---
-    
-    # Pre-calculate samples for global param splitting logic
-    # (We calculate them again or cache them, for simplicity in this snippet we recalculate strictly where needed inside the fn)
-    
+    # general parameter 
     def param_fn_gen(name: str, p: Tensor) -> Tensor:
-        p_sq = p[:Ng]
-        p_bg = p[Ng:]
+        p_sq, p_bg = p[:Ng], p[Ng:]
         repeats = [2] + [1] * (p.dim() - 1)
 
-        # --- Process SQ part ---
+        # sq part
         if name == "scales":
             p_sq_split = torch.log(torch.exp(p_sq[mask_sq]) / 1.6).repeat(2, 1)
         elif name == "opacities" and revised_opacity:
@@ -134,7 +126,7 @@ def split(
             p_sq_split = p_sq[mask_sq].repeat(repeats)
         p_sq_new = torch.cat([p_sq[~mask_sq], p_sq_split])
 
-        # --- Process BG part ---
+        # bg part
         if name == "scales":
             p_bg_split = torch.log(torch.exp(p_bg[mask_bg]) / 1.6).repeat(2, 1)
         elif name == "opacities" and revised_opacity:
@@ -143,17 +135,12 @@ def split(
         else:
             p_bg_split = p_bg[mask_bg].repeat(repeats)
         p_bg_new = torch.cat([p_bg[~mask_bg], p_bg_split])
-
         return torch.nn.Parameter(torch.cat([p_sq_new, p_bg_new]), requires_grad=p.requires_grad)
 
     def optimizer_fn_gen(key: str, v: Tensor) -> Tensor:
-        v_sq = v[:Ng]
-        v_bg = v[Ng:]
-        
         v_sq_split = torch.zeros((2 * n_split_sq, *v.shape[1:]), device=device)
         v_bg_split = torch.zeros((2 * n_split_bg, *v.shape[1:]), device=device)
-        
-        return torch.cat([v_sq[~mask_sq], v_sq_split, v_bg[~mask_bg], v_bg_split])
+        return torch.cat([v[:Ng][~mask_sq], v_sq_split, v[Ng:][~mask_bg], v_bg_split])
 
     _update_param_with_optimizer(param_fn_gen, optimizer_fn_gen, params, optimizers)
 
@@ -170,37 +157,31 @@ def split(
 def remove(
     params: Union[Dict[str, torch.nn.Parameter], torch.nn.ParameterDict],
     optimizers: Dict[str, torch.optim.Optimizer],
-    superq_module: SuperQ,
+    superq: SuperQ,
     superq_optimizers: Dict[str, torch.optim.Optimizer],
     mask: Tensor,
     state: Dict[str, Tensor]
 ):
-    Ng, _ = superq_module.get_counts()
+    Ng, _ = superq.get_counts()
+    superq_params = dict(superq.named_parameters())
 
-    def param_fn(name: str, p: Tensor) -> Tensor:
-        return torch.nn.Parameter(p[mask], requires_grad=p.requires_grad)
+    def _prune_with_mask(mask, params, optimizers, names=None):
+        def param_fn(name: str, p: Tensor) -> Tensor:
+            return torch.nn.Parameter(p[~mask], requires_grad=p.requires_grad)
+        def optimizer_fn(key: str, v: Tensor) -> Tensor:
+            return v[~mask]
+        _update_param_with_optimizer(param_fn, optimizer_fn, params, optimizers, names)
 
-    def optimizer_fn(key: str, v: Tensor) -> Tensor:
-        return v[mask]
+    # prune general parameters
+    _prune_with_mask(mask, params, optimizers)
 
-    # update the parameters and the state in the optimizers
-    _update_param_with_optimizer(param_fn, optimizer_fn, params, optimizers)
-
-    def _prune_single_parameter(superq, is_prune, optimizers, param_name):
-      tmp_dict = {param_name: getattr(superq, param_name)}
-      remove(
-          params=tmp_dict, 
-          optimizers={param_name: optimizers[param_name]}, 
-          state={}, 
-          mask=is_prune
-      )
-      setattr(superq, param_name, tmp_dict[param_name])
-
-    superq_module.prune_buffers(mask[:Ng])
-    _prune_single_parameter(superq_module, mask[:Ng], superq_optimizers, "offsets")
-    _prune_single_parameter(superq_module, mask[Ng:], superq_optimizers, "background")
-
+    # prune superq parameters
+    superq.prune_buffers(mask[:Ng])
+    _prune_with_mask(mask[:Ng], superq_params, superq_optimizers, names=superq.trainable_params_sq)
+    _prune_with_mask(mask[Ng:], superq_params, superq_optimizers, names=superq.trainable_params_bg)
+    superq.update(superq_params)
+    
     # update the extra running state
     for k, v in state.items():
         if isinstance(v, torch.Tensor):
-            state[k] = v[mask]
+            state[k] = v[~mask]

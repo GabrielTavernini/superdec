@@ -46,11 +46,12 @@ class Config:
     scene_id: str = "3f1e1610de"
 
     # New configs
-    target_pts_density: int = 2500
+    target_pts_density: int = 5000
+    min_pts_per_sq: int = 1000
     pred_npz: str = f"data/output_npz/{scene_id}.npz"
     
     # Superq background
-    num_pts_background: int = 50_000 # -1 will use all pointcloud points
+    num_pts_background: int = -1 # -1 will use all pointcloud points
     background_ply: Optional[str] = f"data/scannetpp_v2_backgrounds/{scene_id}_mesh_cropped.ply"
 
     # Disable viewer
@@ -67,7 +68,7 @@ class Config:
     # Downsample factor for the dataset
     # data_factor: int = 4
     # Directory to save results
-    result_dir: str = f"results/{scene_id}_exp"
+    result_dir: str = f"results/{scene_id}_grow"
     # Every N images there is a test image
     test_every: int = 8
     # Random crop size for training  (experimental)
@@ -90,9 +91,9 @@ class Config:
     # Number of training steps
     max_steps: int = 30_000
     # Steps to evaluate the model
-    eval_steps: List[int] = field(default_factory=lambda: [3_000, 7_000, 30_000])
+    eval_steps: List[int] = field(default_factory=lambda: [7_000, 30_000])
     # Steps to save the model
-    save_steps: List[int] = field(default_factory=lambda: [3_000, 7_000, 30_000])
+    save_steps: List[int] = field(default_factory=lambda: [7_000, 30_000])
     # Whether to save superq file
     save_superq: bool = True
     # Whether to save ply file (storage size can be large)
@@ -136,8 +137,10 @@ class Config:
     # Use a colored background
     bkgd_color: List[float] = field(default_factory=lambda: [255.0, 255.0, 255.0])
 
-    # LR for 3D point positions
-    means_lr: float = 1.6e-4
+    # LR for 3D point positions of bg
+    bg_means_lr: float = 1.6e-4
+    # LR for superq parameters
+    superq_lr: float = 1.6e-4
     # LR for Gaussian scale factors
     scales_lr: float = 5e-3
     # LR for alpha blending weights
@@ -213,11 +216,13 @@ def create_splats_with_optimizers(
     parser: Parser,
     pred_handler: PredictionHandler,
     target_pts_density: int = 2000,
+    min_pts_per_sq: int = 1000,
     num_pts_background: int = 10000,
     background_ply: Optional[str] = None,
     init_opacity: float = 0.1,
     init_scale: float = 1.0,
-    means_lr: float = 1.6e-4,
+    bg_means_lr: float = 5e-5,
+    superq_lr: float = 1.6e-4,
     scales_lr: float = 5e-3,
     opacities_lr: float = 5e-2,
     quats_lr: float = 1e-3,
@@ -236,6 +241,7 @@ def create_splats_with_optimizers(
     superq = SuperQ(
         pred_handler, 
         target_pts_density, 
+        min_pts_per_sq,
         num_pts_background, 
         background_ply=background_ply,
         device=device
@@ -303,12 +309,15 @@ def create_splats_with_optimizers(
     }
     superq_optimizers = {
         name: optimizer_class(
-            [{"params": param, "lr": means_lr * scene_scale * math.sqrt(BS), "name": "superq"}],
+            [{"params": param, 
+            "lr": (bg_means_lr if name in superq.trainable_params_bg else superq_lr) * scene_scale * math.sqrt(BS), 
+            "name": "superq"}],
             eps=1e-15 / math.sqrt(BS),
             # TODO: check betas logic when BS is larger than 10 betas[0] will be zero.
             betas=(1 - BS * (1 - 0.9), 1 - BS * (1 - 0.999)),
         ) for name, param in superq.named_parameters()
     }
+    print(superq_optimizers['background'])
     return splats, optimizers, superq, superq_optimizers
 
 
@@ -369,11 +378,13 @@ class Runner:
             self.parser,
             self.pred_handler,
             target_pts_density=cfg.target_pts_density,
+            min_pts_per_sq=cfg.min_pts_per_sq,
             num_pts_background=cfg.num_pts_background,
             background_ply=cfg.background_ply,
             init_opacity=cfg.init_opa,
             init_scale=cfg.init_scale,
-            means_lr=cfg.means_lr,
+            bg_means_lr=cfg.bg_means_lr,
+            superq_lr=cfg.superq_lr,
             scales_lr=cfg.scales_lr,
             opacities_lr=cfg.opacities_lr,
             quats_lr=cfg.quats_lr,
