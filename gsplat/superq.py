@@ -25,7 +25,6 @@ class SuperQ(nn.Module):
         device: str = "cuda",
     ):
         # Anything self.x = nn.Parameter(...) is trainable
-        # trainable = ["offsets_e", "offsets_o", "background", "offsets", "sqscale", "exponents", "translation", "rotation"]
         trainable = ["background", "offsets", "sqscale", "exponents", "translation", "rotation"]
         # trainable = ["background", "offsets"]
 
@@ -82,7 +81,7 @@ class SuperQ(nn.Module):
         if self.move_on_sq:
             self.offsets_e = torch.zeros(etas.shape[0], device=device)
             self.offsets_o = torch.zeros(etas.shape[0], device=device)
-            trainable_params.extend(["offsets_e", "offsets_o"])
+            trainable.extend(["offsets_e", "offsets_o"])
 
         if background_ply is not None:
             pcd = o3d.io.read_point_cloud(background_ply)
