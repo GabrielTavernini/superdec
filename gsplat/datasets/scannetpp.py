@@ -11,6 +11,7 @@ from tqdm import tqdm
 from typing_extensions import assert_never
 import json
 
+from .pycolmap import SceneManager
 from .normalize import (
     align_principal_axes,
     similarity_from_cameras,
@@ -63,6 +64,7 @@ class Parser:
         normalize: bool = False,
         test_every: int = 8,
     ):
+        assert normalize == False
         self.data_dir = data_dir
         self.factor = factor
         self.normalize = normalize #unused
@@ -188,8 +190,13 @@ class Parser:
             image_dir_suffix = f"_{factor}"
         else:
             image_dir_suffix = ""
+        
         colmap_image_dir = os.path.join(data_dir, "resized_images")
         image_dir = os.path.join(data_dir, "resized_images" + image_dir_suffix)
+        if not os.path.exists(colmap_image_dir):
+            colmap_image_dir = os.path.join(data_dir, "rgb")
+            image_dir = os.path.join(data_dir, "rgb" + image_dir_suffix)
+            depth_dir = os.path.join(data_dir, "depth")
         for d in [image_dir, colmap_image_dir]:
             if not os.path.exists(d):
                 raise ValueError(f"Image folder {d} does not exist.")
@@ -205,7 +212,13 @@ class Parser:
             image_files = sorted(_get_rel_paths(image_dir))
         colmap_to_image = dict(zip(colmap_files, image_files))
         image_paths = [os.path.join(image_dir, colmap_to_image[f]) for f in image_names]
+        
+        self.depth_paths = None
+        if depth_dir:
+            depth_paths = [os.path.join(depth_dir, colmap_to_image[f]).replace('.jpg', '.png') for f in image_names]
+            self.depth_paths = depth_paths
 
+        # No normalization
         transform = np.eye(4)
 
         self.image_names = image_names  # List[str], (num_images,)
@@ -373,25 +386,33 @@ class Dataset:
             data["mask"] = torch.from_numpy(mask).bool()
 
         if self.load_depths:
-            # projected points to image plane to get depths
-            worldtocams = np.linalg.inv(camtoworlds)
-            image_name = self.parser.image_names[index]
-            point_indices = self.parser.point_indices[image_name]
-            points_world = self.parser.points[point_indices]
-            points_cam = (worldtocams[:3, :3] @ points_world.T + worldtocams[:3, 3:4]).T
-            points_proj = (K @ points_cam.T).T
-            points = points_proj[:, :2] / points_proj[:, 2:3]  # (M, 2)
-            depths = points_cam[:, 2]  # (M,)
-            # filter out points outside the image
-            selector = (
-                (points[:, 0] >= 0)
-                & (points[:, 0] < image.shape[1])
-                & (points[:, 1] >= 0)
-                & (points[:, 1] < image.shape[0])
-                & (depths > 0)
+            # load depth image
+            depth = imageio.imread(self.parser.depth_paths[index])
+            hc, wc = image.shape[:2]
+            hd, wd = depth.shape[:2]
+            sx = wc / wd
+            sy = hc / hd
+
+            if depth.dtype == np.uint16:
+                depth = depth / 1000.0  # mm → meters (adjust if needed)
+
+            # create pixel grid
+            ys, xs = np.meshgrid(
+                np.arange(hd, dtype=np.float32),
+                np.arange(wd, dtype=np.float32),
+                indexing="ij",
             )
-            points = points[selector]
-            depths = depths[selector]
+
+            # valid depth mask
+            mask = depth > 0
+            points = np.stack(
+                [xs[mask] * sx, ys[mask] * sy],
+                axis=1,
+            )
+
+            # depths (N,)
+            depths = depth[mask]
+
             data["points"] = torch.from_numpy(points).float()
             data["depths"] = torch.from_numpy(depths).float()
 
