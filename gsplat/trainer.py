@@ -15,7 +15,7 @@ import tqdm
 import tyro
 import viser
 import yaml
-from datasets.scannetpp import Dataset, Parser
+from datasets.colmap import Dataset, Parser
 from datasets.traj import (
     generate_ellipse_path_z,
     generate_interpolated_path,
@@ -37,7 +37,7 @@ from gsplat.optimizers import SelectiveAdam
 from gsplat.rendering import rasterization
 from gsplat_viewer import GsplatViewer, GsplatRenderTabState
 from nerfview import CameraState, RenderTabState, apply_float_colormap
-from superq import SuperQ
+from superq import SuperQ, SuperQConfig
 from superstrat import SuperStrategy
 from superdec.utils.predictions_handler import PredictionHandler
 
@@ -46,12 +46,15 @@ class Config:
     scene_id: str = "3f1e1610de"
 
     # New configs
-    target_pts_density: int = 1
-    min_pts_per_sq: int = 3000
+    target_pts_density: int = 500
+    min_pts_per_sq: int = 100
     pred_npz: str = f"data/output_npz/{scene_id}.npz"
+
+    # Marbles
+    use_marbles = False
     
     # Superq background
-    num_pts_background: int = -1 # -1 will use all pointcloud points
+    num_pts_background: int = 20_000 # -1 will use all pointcloud points
     background_ply: Optional[str] = f"data/scannetpp_v2_backgrounds/{scene_id}_mesh_cropped.ply"
 
     # Disable viewer
@@ -65,18 +68,14 @@ class Config:
 
     # Path to the Mip-NeRF 360 dataset
     data_dir: str = f"data/{scene_id}/dslr/"
-    # Downsample factor for the dataset
-    # data_factor: int = 4
     # Directory to save results
-    result_dir: str = f"results/{scene_id}_exp"
+    result_dir: str = f"results/{scene_id}"
     # Every N images there is a test image
     test_every: int = 8
     # Random crop size for training  (experimental)
     patch_size: Optional[int] = None
     # A global scaler that applies to the scene size related parameters
     global_scale: float = 1.0
-    # Normalize the world space
-    # normalize_world_space: bool = False
     # Camera model
     camera_model: Literal["pinhole", "ortho", "fisheye"] = "fisheye"
 
@@ -86,7 +85,7 @@ class Config:
     # Batch size for training. Learning rates are scaled automatically
     batch_size: int = 10
     # A global factor to scale the number of training steps
-    steps_scaler: float = 0.1
+    steps_scaler: float = .1
 
     # Number of training steps
     max_steps: int = 30_000
@@ -119,6 +118,10 @@ class Config:
     # Far plane clipping distance
     far_plane: float = 1e10
 
+    # Config for superq module
+    superq_config: Union[SuperQConfig] = field(
+        default_factory=SuperQConfig
+    )
     # Strategy for GS densification
     strategy: Union[SuperStrategy] = field(
         default_factory=SuperStrategy
@@ -137,10 +140,6 @@ class Config:
     # Use a colored background
     bkgd_color: List[float] = field(default_factory=lambda: [255.0, 255.0, 255.0])
 
-    # LR for 3D point positions of bg
-    bg_means_lr: float = 1.6e-4
-    # LR for superq parameters
-    superq_lr: float = 1.6e-4
     # LR for Gaussian scale factors
     scales_lr: float = 5e-3
     # LR for alpha blending weights
@@ -208,6 +207,7 @@ class Config:
 
         strategy = self.strategy
         strategy.refine_start_iter = int(strategy.refine_start_iter * factor)
+        strategy.refine_start_iter_bg = int(strategy.refine_start_iter_bg * factor)
         strategy.refine_stop_iter = int(strategy.refine_stop_iter * factor)
         strategy.reset_every = int(strategy.reset_every * factor)
         strategy.refine_every = int(strategy.refine_every * factor)
@@ -215,14 +215,14 @@ class Config:
 def create_splats_with_optimizers(
     parser: Parser,
     pred_handler: PredictionHandler,
+    superq_config: SuperQConfig,
     target_pts_density: int = 2000,
     min_pts_per_sq: int = 1000,
     num_pts_background: int = 10000,
     background_ply: Optional[str] = None,
+    use_marbles: bool = False,
     init_opacity: float = 0.1,
     init_scale: float = 1.0,
-    bg_means_lr: float = 5e-5,
-    superq_lr: float = 1.6e-4,
     scales_lr: float = 5e-3,
     opacities_lr: float = 5e-2,
     quats_lr: float = 1e-3,
@@ -239,6 +239,7 @@ def create_splats_with_optimizers(
     world_size: int = 1,
 ) -> Tuple[torch.nn.ParameterDict, Dict[str, torch.optim.Optimizer]]:
     superq = SuperQ(
+        superq_config,
         pred_handler, 
         target_pts_density, 
         min_pts_per_sq,
@@ -255,13 +256,18 @@ def create_splats_with_optimizers(
     # Initialize the GS size to be the average dist of the 3 nearest neighbors
     dist2_avg = (knn(points, 4)[:, 1:] ** 2).mean(dim=-1)  # [N,]
     dist_avg = torch.sqrt(dist2_avg)
-    scales = torch.log(dist_avg * init_scale).unsqueeze(-1).repeat(1, 3)  # [N, 3]
+    scales = torch.log(dist_avg * init_scale).unsqueeze(-1)
+    quats = torch.rand((N, 4))  # [N, 4]
+    if not use_marbles:
+        scales = scales.repeat(1, 3)  # [N, 3]
+    else:
+        quats = torch.zeros_like(quats)
+        quats[:, 0] = 1.0
 
     # Distribute the GSs to different ranks (also works for single rank)
     points = points[world_rank::world_size]
     rgbs = rgbs[world_rank::world_size]
     scales = scales[world_rank::world_size]    
-    quats = torch.rand((N, 4))  # [N, 4]
     opacities = torch.logit(torch.full((N,), init_opacity))  # [N,]
     
     params = [
@@ -307,10 +313,11 @@ def create_splats_with_optimizers(
         )
         for name, _, lr in params
     }
+
     superq_optimizers = {
         name: optimizer_class(
             [{"params": param, 
-            "lr": (bg_means_lr if name in superq.trainable_params_bg else superq_lr) * scene_scale * math.sqrt(BS), 
+            "lr": superq.get_lr(name) * scene_scale * math.sqrt(BS), 
             "name": "superq"}],
             eps=1e-15 / math.sqrt(BS),
             # TODO: check betas logic when BS is larger than 10 betas[0] will be zero.
@@ -362,6 +369,7 @@ class Runner:
             self.parser,
             split="train",
             patch_size=cfg.patch_size,
+            load_depths=cfg.depth_loss,
         )
         self.valset = Dataset(self.parser, split="val")
         self.scene_scale = self.parser.scene_scale * 1.1 * cfg.global_scale
@@ -376,14 +384,14 @@ class Runner:
         self.splats, self.optimizers, self.superq, self.superq_optimizers = create_splats_with_optimizers(
             self.parser,
             self.pred_handler,
+            superq_config=cfg.superq_config,
             target_pts_density=cfg.target_pts_density,
             min_pts_per_sq=cfg.min_pts_per_sq,
             num_pts_background=cfg.num_pts_background,
             background_ply=cfg.background_ply,
+            use_marbles=cfg.use_marbles,
             init_opacity=cfg.init_opa,
             init_scale=cfg.init_scale,
-            bg_means_lr=cfg.bg_means_lr,
-            superq_lr=cfg.superq_lr,
             scales_lr=cfg.scales_lr,
             opacities_lr=cfg.opacities_lr,
             quats_lr=cfg.quats_lr,
@@ -571,6 +579,9 @@ class Runner:
         render_quats = quats[:Nsqg]
         render_scales = scales[:Nsqg]
         render_opacities = opacities[:Nsqg]
+        if  self.cfg.use_marbles:
+            render_scales = render_scales.repeat(1, 3)
+        
         if visualize_points:
             # Force all scales to be small and uniform (x=y=z=radius)
             render_scales = torch.full_like(render_scales, 0.01)
@@ -1099,8 +1110,8 @@ class Runner:
         )  # [N, 4, 4]
 
         camtoworlds_all = torch.from_numpy(camtoworlds_all).float().to(device)
-        K = torch.from_numpy(self.parser.K).float().to(device)
-        width, height = self.parser.imsize
+        K = torch.from_numpy(list(self.parser.Ks_dict.values())[0]).float().to(device)
+        width, height = list(self.parser.imsize_dict.values())[0]
 
         # save to video
         video_dir = f"{cfg.result_dir}/videos"

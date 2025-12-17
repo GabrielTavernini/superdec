@@ -15,7 +15,7 @@ import tqdm
 import tyro
 import viser
 import yaml
-from datasets.scannetpp import Dataset, Parser
+from datasets.colmap import Dataset, Parser
 from datasets.traj import (
     generate_ellipse_path_z,
     generate_interpolated_path,
@@ -42,6 +42,8 @@ from nerfview import CameraState, RenderTabState, apply_float_colormap
 
 @dataclass
 class Config:
+    scene_id: str = "3f1e1610de"
+
     # Disable viewer
     disable_viewer: bool = False
     # Path to the .pt files. If provide, it will skip training and run evaluation only.
@@ -52,19 +54,15 @@ class Config:
     render_traj_path: str = "interp"
 
     # Path to the Mip-NeRF 360 dataset
-    data_dir: str = "data/3f1e1610de/dslr"
-    # Downsample factor for the dataset
-    data_factor: int = 4
+    data_dir: str = f"data/{scene_id}/dslr"
     # Directory to save results
-    result_dir: str = "results/3f1e1610de_no_sq"
+    result_dir: str = f"results/{scene_id}_no_sq"
     # Every N images there is a test image
     test_every: int = 8
     # Random crop size for training  (experimental)
     patch_size: Optional[int] = None
     # A global scaler that applies to the scene size related parameters
     global_scale: float = 1.0
-    # Normalize the world space
-    normalize_world_space: bool = True
     # Camera model
     camera_model: Literal["pinhole", "ortho", "fisheye"] = "fisheye"
 
@@ -72,7 +70,7 @@ class Config:
     port: int = 8080
 
     # Batch size for training. Learning rates are scaled automatically
-    batch_size: int = 10
+    batch_size: int = 10 # > 1 not supported by depth loss
     # A global factor to scale the number of training steps
     steps_scaler: float = .1
 
@@ -90,7 +88,7 @@ class Config:
     disable_video: bool = False
 
     # Initialization strategy
-    init_type: str = "random"
+    init_type: str = "sfm"
     # Initial number of GSs. Ignored if using sfm
     init_num_pts: int = 100_000
     # Initial extent of GSs as a multiple of the camera extent. Ignored if using sfm
@@ -333,15 +331,13 @@ class Runner:
         # Load data: Training data should contain initial points and colors.
         self.parser = Parser(
             data_dir=cfg.data_dir,
-            # factor=cfg.data_factor,
-            # normalize=cfg.normalize_world_space,
             test_every=cfg.test_every,
         )
         self.trainset = Dataset(
             self.parser,
             split="train",
             patch_size=cfg.patch_size,
-            # load_depths=cfg.depth_loss,
+            load_depths=cfg.depth_loss,
         )
         self.valset = Dataset(self.parser, split="val")
         self.scene_scale = self.parser.scene_scale * 1.1 * cfg.global_scale
@@ -1046,8 +1042,8 @@ class Runner:
         )  # [N, 4, 4]
 
         camtoworlds_all = torch.from_numpy(camtoworlds_all).float().to(device)
-        K = torch.from_numpy(self.parser.K).float().to(device)
-        width, height = self.parser.imsize
+        K = torch.from_numpy(list(self.parser.Ks_dict.values())[0]).float().to(device)
+        width, height = list(self.parser.imsize_dict.values())[0]
 
         # save to video
         video_dir = f"{cfg.result_dir}/videos"

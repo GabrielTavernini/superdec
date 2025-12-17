@@ -79,12 +79,13 @@ class SuperStrategy(Strategy):
     """
     prune_sq: bool = True
     prune_bg: bool = True
-    dupli_sq: bool = False
+    dupli_sq: bool = True
     dupli_bg: bool = False
-    split_sq: bool = False
+    split_sq: bool = True
     split_bg: bool = False
+    refine_start_iter_bg: int = 7000
     prune_opa: float = 0.005
-    grow_grad2d: float = 0.0002
+    grow_grad2d: float = 0.0008
     grow_scale3d: float = 0.01
     grow_scale2d: float = 0.05
     prune_scale3d: float = 0.1
@@ -95,7 +96,7 @@ class SuperStrategy(Strategy):
     reset_every: int = 3000
     refine_every: int = 100
     pause_refine_after_reset: int = 0
-    absgrad: bool = False
+    absgrad: bool = True
     revised_opacity: bool = False
     verbose: bool = False
     key_for_gradient: Literal["means2d", "gradient_2dgs"] = "means2d"
@@ -178,8 +179,11 @@ class SuperStrategy(Strategy):
             and step % self.refine_every == 0
             and step % self.reset_every >= self.pause_refine_after_reset
         ):
+            self._dupli_bg = self.dupli_bg & (step > self.refine_start_iter_bg)
+            self._split_bg = self.split_bg & (step > self.refine_start_iter_bg)
+
             # grow GSs
-            if self.dupli_sq or self.dupli_bg or self.split_sq or self.split_bg:
+            if self.dupli_sq or self._dupli_bg or self.split_sq or self._split_bg:
                 n_dupli, n_split = self._grow_gs(params, optimizers, superq, superq_optimizers, state, step)
                 if self.verbose:
                     print(
@@ -292,7 +296,7 @@ class SuperStrategy(Strategy):
         )
         is_dupli = is_grad_high & is_small
         is_dupli[:Ng] &= self.dupli_sq
-        is_dupli[Ng:] &= self.dupli_bg
+        is_dupli[Ng:] &= self._dupli_bg
         n_dupli = is_dupli.sum().item()
 
         is_large = ~is_small
@@ -300,7 +304,7 @@ class SuperStrategy(Strategy):
         if step < self.refine_scale2d_stop_iter:
             is_split |= state["radii"] > self.grow_scale2d
         is_split[:Ng] &= self.split_sq
-        is_split[Ng:] &= self.split_bg
+        is_split[Ng:] &= self._split_bg
         n_split = is_split.sum().item()
 
         # first duplicate

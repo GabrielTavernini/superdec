@@ -3,7 +3,8 @@ import torch.nn as nn
 import numpy as np
 import open3d as o3d
 import math
-from typing import Optional
+from typing import Optional, assert_never
+from dataclasses import dataclass
 
 from utils import estimate_sq_surface_areas
 from gsplat.strategy.ops import remove
@@ -11,17 +12,30 @@ from gsplat.strategy.ops import remove
 from superdec.loss.sampler import EqualDistanceSamplerSQ
 from superdec.utils.predictions_handler import PredictionHandler
 
+@dataclass
+class SuperQConfig():
+    # LR for 3D point positions of bg
+    means_lr: float = .8e-4
+    # LR for 3D offsets
+    offsets_lr: float = 1.6e-4
+    # LR for superq parameters
+    superq_lr: float = .8e-4
+    # LR for superq eta omegas
+    superq_pos_lr: float = 1e-5
+    # Allow gaussians to move on the surface
+    move_on_sq: bool = False
+    # Max offset from attachement point
+    max_offset: float = 0.2
+
 class SuperQ(nn.Module):
     def __init__(
         self, 
+        cfg: SuperQConfig,
         pred_handler: PredictionHandler,
         target_pts_density: int = 2000,
         min_pts_per_sq: int = 1000,
         num_pts_background: int = -1,
-        negative_offset: bool = True,
-        max_offset: float = 0.05,
         background_ply: Optional[str] = None,
-        move_on_sq: bool = False,
         device: str = "cuda",
     ):
         # Anything self.x = nn.Parameter(...) is trainable
@@ -35,12 +49,9 @@ class SuperQ(nn.Module):
         self.translation = torch.tensor(pred_handler.translation.reshape(-1, 3)[self.mask], dtype=torch.float, device=device)
         self.rotation = torch.tensor(pred_handler.rotation.reshape(-1, 3, 3)[self.mask], dtype=torch.float, device=device)
         self.pred_handler = pred_handler
+        self.cfg = cfg
 
         print(f"Loaded {self.sqscale.shape[0]} superquadircs.")
-
-        self.negative_offset = negative_offset
-        self.max_offset = max_offset
-        self.move_on_sq = move_on_sq
 
         # Calculate specific points per SQ
         areas = estimate_sq_surface_areas(self).detach().cpu().numpy()  # [S]
@@ -78,7 +89,7 @@ class SuperQ(nn.Module):
         )
         self.register_buffer("sq_idx", sq_idx_tensor)
         self.offsets = torch.zeros(etas.shape[0], 3, device=device)
-        if self.move_on_sq:
+        if self.cfg.move_on_sq:
             self.offsets_e = torch.zeros(etas.shape[0], device=device)
             self.offsets_o = torch.zeros(etas.shape[0], device=device)
             trainable.extend(["offsets_e", "offsets_o"])
@@ -102,6 +113,18 @@ class SuperQ(nn.Module):
         self.trainable_params_bg = self.trainable_params(True)
         print("Trainable superq-tied params:", self.trainable_params_sq)
         print("Trainable background params:", self.trainable_params_bg)
+
+    def get_lr(self, param_name):
+        if param_name in ["background"]:
+            return self.cfg.means_lr
+        elif param_name in ["offsets"]:
+            return self.cfg.offsets_lr
+        elif param_name in ["sqscale", "exponents", "translation", "rotation"]:
+            return self.cfg.superq_lr
+        elif param_name in ["offsets_e", "offsets_o"]:
+            return self.cfg.superq_pos_lr
+        else:
+            assert_never()
 
     def load_dynamic_checkpoint(self, state_dict):
         if "offsets" not in state_dict:
@@ -229,7 +252,7 @@ class SuperQ(nn.Module):
 
         etas = self.etas
         omegas = self.omegas
-        if self.move_on_sq:
+        if self.cfg.move_on_sq:
             etas += self.offsets_e
             omegas += self.offsets_o
         cos_eta, sin_eta = torch.cos(etas), torch.sin(etas)
@@ -254,10 +277,5 @@ class SuperQ(nn.Module):
 
     def forward(self):
         global_pos = self._compute_means()
-
-        if self.negative_offset:
-            offset_val = torch.tanh(self.offsets) * self.max_offset
-        else:
-            offset_val = torch.sigmoid(self.offsets) * self.max_offset  
-        global_pos += offset_val
+        global_pos += torch.tanh(self.offsets) * self.cfg.max_offset
         return torch.cat((global_pos, self.background), 0)
