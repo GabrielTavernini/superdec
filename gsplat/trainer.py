@@ -53,6 +53,8 @@ class Config:
     # Marbles
     use_marbles = False
     
+    # Show superqs
+    show_superqs = False
     # Superq background
     num_pts_background: int = 20_000 # -1 will use all pointcloud points
     background_ply: Optional[str] = f"data/scannetpp_v2_backgrounds/{scene_id}_mesh_cropped.ply"
@@ -585,8 +587,6 @@ class Runner:
         if visualize_points:
             # Force all scales to be small and uniform (x=y=z=radius)
             render_scales = torch.full_like(render_scales, 0.01)
-            render_quats = torch.zeros_like(render_quats)
-            render_quats[:, 0] = 1.0
             render_opacities = torch.full_like(render_opacities, 1)
 
         render_colors, render_alphas, info = rasterization(
@@ -676,6 +676,15 @@ class Runner:
                     time.sleep(0.01)
                 self.viewer.lock.acquire()
                 tic = time.time()
+
+            if cfg.show_superqs and step % 10 == 0:
+                _, meshes = self.superq.update_handler()
+                for i, m in enumerate(meshes):
+                    self.server.scene.add_mesh_trimesh(
+                        f"sq/mesh_{i}",
+                        mesh=m,
+                        visible=True,
+                    )
 
             try:
                 data = next(trainloader_iter)
@@ -827,7 +836,7 @@ class Runner:
             # save checkpoint before updating the model
             if step in [i - 1 for i in cfg.save_steps] or step == max_steps - 1:
                 if cfg.save_superq:
-                    handler = self.superq.update_handler()
+                    handler, meshes = self.superq.update_handler()
                     handler.save_npz(f"{self.superq_dir}/superq_{step:04d}.npz")
 
                 mem = torch.cuda.max_memory_allocated() / 1024**3

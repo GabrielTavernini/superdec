@@ -94,7 +94,7 @@ def split(
             if len(p.shape) > 1 and p.shape[1] == 3:
                 p_split = (p[mask] + samples).reshape(-1, 3) # [2*N, 3]
             else:
-                p_split = p[mask].repeat(2, *p.shape[1:])
+                p_split = p[mask].repeat(2, *[1] * (p.dim() - 1))
             return torch.nn.Parameter(torch.cat([p[~mask], p_split]), requires_grad=True)
         def o_fn(k, v):
             return torch.cat([v[~mask], torch.zeros((2 * mask.sum().item(), *v.shape[1:]), device=device)])

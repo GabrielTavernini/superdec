@@ -1,1 +1,1 @@
-module load stack/2024-06 gcc/12.2.0
+module load stack/2024-06 gcc/12.2.0 ffmpeg/6.0
