@@ -88,11 +88,27 @@ def split(
             torch.randn(2, len(scales), 3, device=device),
         )  # [2, N, 3]
         return samples
+    
+    def get_samples_2d(param_scales, param_quats, mask):
+        # for surface offsets
+        scales = torch.exp(param_scales[mask])
+        quats = F.normalize(param_quats[mask], dim=-1)
+        rotmats = normalized_quat_to_rotmat(quats)  # [N, 3, 3]
+        samples = torch.einsum(
+            "nij,nj,bnx->bnx", # not sure this is correct
+            rotmats,
+            scales,
+            torch.randn(2, len(scales), 2, device=device),
+        )  # [2, N, 2]
+        return samples
 
-    def _split_with_mask(mask, samples, params, optimizers, names=None):
+    def _split_with_mask(mask, samples, samples_2d, params, optimizers, names=None):
         def p_fn(n, p):
             if len(p.shape) > 1 and p.shape[1] == 3:
                 p_split = (p[mask] + samples).reshape(-1, 3) # [2*N, 3]
+            elif len(p.shape) > 1 and p.shape[1] == 2:
+                # for the surface offsets
+                p_split = (p[mask] + samples_2d).reshape(-1, 2) # [2*N, 3]
             else:
                 p_split = p[mask].repeat(2, *[1] * (p.dim() - 1))
             return torch.nn.Parameter(torch.cat([p[~mask], p_split]), requires_grad=True)
@@ -103,11 +119,12 @@ def split(
     if n_split_sq > 0:
         superq.densify_buffers(mask_sq, split=True)
         sq_samples = get_samples(params['scales'][:Ng], params['quats'][:Ng], mask_sq)
-        _split_with_mask(mask_sq, sq_samples, superq_params, superq_optimizers, names=superq.trainable_params_sq)
+        samples_2d = get_samples_2d(params['scales'][:Ng], params['quats'][:Ng], mask_sq)
+        _split_with_mask(mask_sq, sq_samples, samples_2d, superq_params, superq_optimizers, names=superq.trainable_params_sq)
 
     if n_split_bg > 0:
         bg_samples = get_samples(params['scales'][Ng:], params['quats'][Ng:], mask_bg)
-        _split_with_mask(mask_bg, bg_samples, superq_params, superq_optimizers, names=superq.trainable_params_bg)
+        _split_with_mask(mask_bg, bg_samples, None, superq_params, superq_optimizers, names=superq.trainable_params_bg)
 
     superq.update(superq_params)
 

@@ -40,6 +40,7 @@ class SuperQ(nn.Module):
     ):
         # Anything self.x = nn.Parameter(...) is trainable
         trainable = ["background", "offsets", "sqscale", "exponents", "translation", "rotation"]
+        # trainable = ["background", "offsets", "sqscale", "translation", "rotation"]
         # trainable = ["background", "offsets"]
 
         super().__init__()
@@ -107,7 +108,7 @@ class SuperQ(nn.Module):
         else:
             self.background = self._create_background(num_pts_background)
 
-        self._init_heads()
+        self._init_heads(N)
         self._forward_params()
         # Turn selected attributes into trainable parameters
         for name in trainable:
@@ -129,18 +130,19 @@ class SuperQ(nn.Module):
         elif param_name in ["offsets_e", "offsets_o", "surface_offsets"]:
             return self.cfg.superq_pos_lr
         else:
+            return self.cfg.superq_lr
             assert_never()
 
-    def _init_heads(self):
+    def _init_heads(self, N):
         pass        
         # feature_dim = 32
         # hidden_dim = feature_dim * 2
 
-        # self.features = nn.Parameter(torch.randn(N, feature_dim, device=device))
+        # self.features = nn.Parameter(torch.randn(N, feature_dim, device=self.etas.device))
         # self.head_exp = nn.Sequential(
-        #     nn.Linear(feature_dim, hidden_dim, device=device),
+        #     nn.Linear(feature_dim, hidden_dim, device=self.etas.device),
         #     nn.ReLU(),
-        #     nn.Linear(hidden_dim, 2, device=device),
+        #     nn.Linear(hidden_dim, 2, device=self.etas.device),
         #     nn.Sigmoid(),
         # )
         # self.head_scale = nn.Linear(feature_dim, 3, device=device)
