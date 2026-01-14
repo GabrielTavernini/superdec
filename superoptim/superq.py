@@ -14,6 +14,7 @@ class SuperQ(nn.Module):
         self, 
         pred_handler: PredictionHandler,
         truncation: float = 0.1,
+        ply: str = None,
         device: str = "cuda",
     ):
         # Anything self.x = nn.Parameter(...) is trainable
@@ -28,9 +29,19 @@ class SuperQ(nn.Module):
         rot_mat = torch.tensor(pred_handler.rotation.reshape(-1, 3, 3)[self.mask], dtype=torch.float, device=device)
         self.raw_rotation = rot_mat[:, :, :2].clone() # Shape (N, 3, 2)
         self.translation = torch.tensor(pred_handler.translation.reshape(-1, 3)[self.mask], dtype=torch.float, device=device)
-        self.assign_matrix = torch.tensor(pred_handler.assign_matrix.T[self.mask], dtype=torch.float, device=device).squeeze()
         
-        self.points = torch.tensor(np.array(pred_handler.get_segmented_pcs()[0].points), dtype=torch.float, device=device)
+        self.assign_matrix = torch.tensor(pred_handler.assign_matrix.T[self.mask], dtype=torch.float, device=device).squeeze() # [N, 4096]
+        self.points = torch.tensor(np.array(pred_handler.get_segmented_pcs()[0].points), dtype=torch.float, device=device) # [4096, 3]
+        
+        if ply:
+            pcd = o3d.io.read_point_cloud(ply) 
+            ply_points = torch.tensor(np.array(pcd.points), dtype=torch.float, device=device) 
+            distances = torch.cdist(ply_points, self.points)
+            nearest_indices = torch.argmin(distances, dim=1)
+            full_assign_matrix = self.assign_matrix[:, nearest_indices]
+            self.assign_matrix = full_assign_matrix
+            self.points = ply_points
+
         self.pred_handler = pred_handler
         self.truncation = truncation
         self.device = device
@@ -147,7 +158,7 @@ class SuperQ(nn.Module):
 
 
     def forward(self):
-        sdf_values = torch.zeros((4096), device=self.device)
+        sdf_values = torch.zeros(self.points.shape[0], device=self.device)
         for i in range(self.N):
             v = self.sdf(i)
             p_mask = (self.assign_matrix[i] == 1)

@@ -10,6 +10,7 @@ import viser
 from superdec.data.dataloader import normalize_points, denormalize_outdict
 from superdec.data.transform import rotate_around_axis
 import time
+from superdec.utils.visualizations import generate_ncolors
 
 from tqdm import tqdm
 import matplotlib.pyplot as plt
@@ -109,11 +110,10 @@ def plot_pred_handler(pred_handler, truncation, wolrd_y=0.15, filename="superq_p
 def main():
     truncation = 0.05
     pred_handler = PredictionHandler.from_npz("test.npz")
-    pcs = pred_handler.get_segmented_pcs()[0]
-
     superq = SuperQ(
         pred_handler=pred_handler,
-        truncation=truncation
+        truncation=truncation,
+        # ply="examples/chair.ply"
     )
     optimizer = torch.optim.Adam(superq.parameters(), lr=1e-4)
     
@@ -129,11 +129,12 @@ def main():
         optimizer.zero_grad()
         
         sdf_values = superq.forward()
-        # loss = torch.sum(torch.abs(sdf_values))
+        # loss = torch.mean(torch.abs(sdf_values))
 
         pos_part = torch.clamp(sdf_values, min=0)
         neg_part = torch.clamp(sdf_values, max=0)
-        loss = weight_pos * torch.sum(pos_part) + weight_neg * torch.sum(torch.abs(neg_part))
+        loss = weight_pos * torch.mean(pos_part) + weight_neg * torch.mean(torch.abs(neg_part))
+        loss /= weight_pos + weight_neg
         if torch.isnan(loss):
             print("Failed optimization with nan values")
             exit()
@@ -155,10 +156,15 @@ def main():
 
     server = viser.ViserServer()
     server.scene.add_mesh_trimesh("superquadrics_orig", mesh=orig_mesh, visible=False)
+
+    points = superq.points.detach().cpu().numpy()
+    assign_matrix = superq.assign_matrix.detach().cpu().numpy()
+    colors = generate_ncolors(assign_matrix.shape[0])
+    colored_pc = colors[np.argmax(assign_matrix, axis=0)]
     server.scene.add_point_cloud(
         name="/segmented_pointcloud_orig",
-        points=np.array(pcs.points),
-        colors=np.array(pcs.colors),
+        points=points,
+        colors=colored_pc,
         point_size=0.005,
         visible=False,
     )
@@ -166,7 +172,7 @@ def main():
     server.scene.add_mesh_trimesh("superquadrics", mesh=mesh, visible=True)
     server.scene.add_point_cloud(
         name="/segmented_pointcloud",
-        points=np.array(pcs.points),
+        points=points,
         colors=sdf_colors,
         point_size=0.005,
     )
