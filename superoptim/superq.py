@@ -14,6 +14,7 @@ class SuperQ(nn.Module):
         self, 
         pred_handler: PredictionHandler,
         truncation: float = 0.1,
+        use_segmentation: bool = False,
         ply: str = None,
         idx: int = 0,
         device: str = "cuda",
@@ -32,6 +33,7 @@ class SuperQ(nn.Module):
         self.raw_rotation = rot_mat[:, :, :2].clone() # Shape (N, 3, 2)
         self.translation = torch.tensor(pred_handler.translation[self.idx].reshape(-1, 3)[self.mask], dtype=torch.float, device=device)
         
+        self.use_segmentation = use_segmentation
         self.assign_matrix = torch.tensor(pred_handler.assign_matrix[self.idx].T[self.mask], dtype=torch.float, device=device).squeeze() # [N, 4096]
         self.points = torch.tensor(np.array(pred_handler.get_segmented_pcs()[self.idx].points), dtype=torch.float, device=device) # [4096, 3]
         
@@ -123,8 +125,11 @@ class SuperQ(nn.Module):
         # 1. Transform points to local coordinate system
         # X = R' * (points - t)
         # Note: rotation_matrix.T is equivalent to R'
-        p_mask = (self.assign_matrix[idx] == 1)
-        points = self.points[p_mask].T
+        if self.use_segmentation:
+            p_mask = (self.assign_matrix[idx] == 1)
+            points = self.points[p_mask].T
+        else:
+            points = self.points.T
         points_centered = points - self.translation[idx][:, None]
         X = self.rotation()[idx].T @ points_centered
         
@@ -160,11 +165,14 @@ class SuperQ(nn.Module):
 
 
     def forward(self):
-        sdf_values = torch.zeros(self.points.shape[0], device=self.device)
-        for i in range(self.N):
-            v = self.sdf(i)
-            p_mask = (self.assign_matrix[i] == 1)
-            sdf_values[p_mask] = v
-        
+        if self.use_segmentation:
+            sdf_values = torch.zeros(self.points.shape[0], device=self.device)
+            for i in range(self.N):
+                p_mask = (self.assign_matrix[i] == 1)
+                sdf_values[p_mask] = self.sdf(i)
+        else:
+            sdf_values = self.sdf(0)
+            for i in range(1, self.N):
+                sdf_values = torch.minimum(self.sdf(i), sdf_values)
         return sdf_values
         
