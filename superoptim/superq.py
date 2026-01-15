@@ -15,6 +15,7 @@ class SuperQ(nn.Module):
         pred_handler: PredictionHandler,
         truncation: float = 0.1,
         ply: str = None,
+        idx: int = 0,
         device: str = "cuda",
     ):
         # Anything self.x = nn.Parameter(...) is trainable
@@ -22,16 +23,17 @@ class SuperQ(nn.Module):
         trainable = ["raw_sqscale", "raw_exponents", "raw_rotation", "translation"]
 
         super().__init__()
-        self.mask = (pred_handler.exist > 0.5).reshape(-1)
-        self.raw_sqscale = torch.tensor(pred_handler.scale.reshape(-1, 3)[self.mask], dtype=torch.float, device=device)
-        self.raw_exponents = torch.tensor(pred_handler.exponents.reshape(-1, 2)[self.mask], dtype=torch.float, device=device)
+        self.idx = idx
+        self.mask = (pred_handler.exist[self.idx] > 0.5).reshape(-1)
+        self.raw_sqscale = torch.tensor(pred_handler.scale[self.idx].reshape(-1, 3)[self.mask], dtype=torch.float, device=device)
+        self.raw_exponents = torch.tensor(pred_handler.exponents[self.idx].reshape(-1, 2)[self.mask], dtype=torch.float, device=device)
         # On the Continuity of Rotation Representations in Neural Networks (Zhou et al.)
-        rot_mat = torch.tensor(pred_handler.rotation.reshape(-1, 3, 3)[self.mask], dtype=torch.float, device=device)
+        rot_mat = torch.tensor(pred_handler.rotation[self.idx].reshape(-1, 3, 3)[self.mask], dtype=torch.float, device=device)
         self.raw_rotation = rot_mat[:, :, :2].clone() # Shape (N, 3, 2)
-        self.translation = torch.tensor(pred_handler.translation.reshape(-1, 3)[self.mask], dtype=torch.float, device=device)
+        self.translation = torch.tensor(pred_handler.translation[self.idx].reshape(-1, 3)[self.mask], dtype=torch.float, device=device)
         
-        self.assign_matrix = torch.tensor(pred_handler.assign_matrix.T[self.mask], dtype=torch.float, device=device).squeeze() # [N, 4096]
-        self.points = torch.tensor(np.array(pred_handler.get_segmented_pcs()[0].points), dtype=torch.float, device=device) # [4096, 3]
+        self.assign_matrix = torch.tensor(pred_handler.assign_matrix[self.idx].T[self.mask], dtype=torch.float, device=device).squeeze() # [N, 4096]
+        self.points = torch.tensor(np.array(pred_handler.get_segmented_pcs()[self.idx].points), dtype=torch.float, device=device) # [4096, 3]
         
         if ply:
             pcd = o3d.io.read_point_cloud(ply) 
@@ -98,11 +100,11 @@ class SuperQ(nn.Module):
 
     def update_handler(self):
         batch_size = self.pred_handler.scale.shape[1]
-        mask = self.mask.reshape(-1, batch_size)
-        self.pred_handler.scale[mask] = self.sqscale().detach().cpu().numpy()
-        self.pred_handler.exponents[mask] = self.exponents().detach().cpu().numpy()
-        self.pred_handler.rotation[mask] = self.rotation().detach().cpu().numpy()
-        self.pred_handler.translation[mask] = self.translation.detach().cpu().numpy()
+        mask = self.mask.reshape(batch_size)
+        self.pred_handler.scale[self.idx][mask] = self.sqscale().detach().cpu().numpy()
+        self.pred_handler.exponents[self.idx][mask] = self.exponents().detach().cpu().numpy()
+        self.pred_handler.rotation[self.idx][mask] = self.rotation().detach().cpu().numpy()
+        self.pred_handler.translation[self.idx][mask] = self.translation.detach().cpu().numpy()
         meshes = self.pred_handler.get_meshes(resolution=30)
         return self.pred_handler, meshes
 
