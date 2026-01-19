@@ -20,21 +20,23 @@ from utils import plot_pred_handler
 
 def main():
     truncation = 0.05
-    pred_handler = PredictionHandler.from_npz("test.npz")
+    pred_handler = PredictionHandler.from_npz("data/output_npz/objects/round_table6.npz")
     superq = SuperQ(
         pred_handler=pred_handler,
         truncation=truncation,
         # ply="examples/chair.ply"
     )
-    optimizer = torch.optim.Adam(superq.parameters(), lr=1e-4)
+    optimizer = torch.optim.Adam(superq.parameters(), lr=1e-3)
     
     pred_handler, meshes = superq.update_handler()
     orig_mesh = meshes[0]
     plot_pred_handler(pred_handler, truncation, filename="superq_plot_orig.png")
 
+    # torch.autograd.set_detect_anomaly(True)
     num_epochs = 1000
     weight_pos = 2.0
     weight_neg = 1.0
+    weight_scale = 0.1
     pbar = tqdm(range(num_epochs), desc="Fitting Superquadrics")
     for epoch in pbar:
         optimizer.zero_grad()
@@ -44,17 +46,22 @@ def main():
 
         pos_part = torch.clamp(sdf_values, min=0)
         neg_part = torch.clamp(sdf_values, max=0)
-        loss = weight_pos * torch.mean(pos_part) + weight_neg * torch.mean(torch.abs(neg_part))
-        loss /= weight_pos + weight_neg
+        Lsdf = weight_pos * torch.mean(pos_part) + weight_neg * torch.mean(torch.abs(neg_part))
+        Lsdf /= weight_pos + weight_neg
+        
+        volumes = torch.prod(superq.scale(), dim=1)
+        Lreg = weight_scale * torch.mean(volumes)
+        
+        loss = Lsdf + Lreg
         if torch.isnan(loss):
             print("Failed optimization with nan values")
             exit()
         
         loss.backward()
+        # torch.nn.utils.clip_grad_norm_(superq.parameters(), max_norm=1.0)
         optimizer.step()
-        pbar.set_postfix({"Loss": f"{loss.item():.6f}"})
-
-    sdf_values = superq.forward().detach().cpu().numpy()
+        pbar.set_postfix({"Lsdf": f"{Lsdf.item():.6f}", "Loss": f"{loss.item():.6f}"})
+    sdf_values = sdf_values.detach().cpu().numpy()
     
     pred_handler, meshes = superq.update_handler()
     mesh = meshes[0]

@@ -7,6 +7,7 @@ import math
 from typing import Optional, assert_never
 from dataclasses import dataclass
 
+from utils import quat2mat, mat2quat
 from superdec.utils.predictions_handler import PredictionHandler
 
 class SuperQ(nn.Module):
@@ -20,17 +21,16 @@ class SuperQ(nn.Module):
         device: str = "cuda",
     ):
         # Anything self.x = nn.Parameter(...) is trainable
-        # trainable = ["sqscale", "exponents", "translation", "rotation"]
-        trainable = ["raw_sqscale", "raw_exponents", "raw_rotation", "translation"]
+        trainable = ["raw_scale", "raw_exponents", "raw_rotation", "translation"]
 
         super().__init__()
         self.idx = idx
         self.mask = (pred_handler.exist[self.idx] > 0.5).reshape(-1)
-        self.raw_sqscale = torch.tensor(pred_handler.scale[self.idx].reshape(-1, 3)[self.mask], dtype=torch.float, device=device)
+        raw_scale = torch.tensor(pred_handler.scale[self.idx].reshape(-1, 3)[self.mask], dtype=torch.float, device=device)
+        self.raw_scale = torch.log(raw_scale)
         self.raw_exponents = torch.tensor(pred_handler.exponents[self.idx].reshape(-1, 2)[self.mask], dtype=torch.float, device=device)
-        # On the Continuity of Rotation Representations in Neural Networks (Zhou et al.)
         rot_mat = torch.tensor(pred_handler.rotation[self.idx].reshape(-1, 3, 3)[self.mask], dtype=torch.float, device=device)
-        self.raw_rotation = rot_mat[:, :, :2].clone() # Shape (N, 3, 2)
+        self.raw_rotation = mat2quat(rot_mat) # Shape (N, 3)
         self.translation = torch.tensor(pred_handler.translation[self.idx].reshape(-1, 3)[self.mask], dtype=torch.float, device=device)
         
         self.use_segmentation = use_segmentation
@@ -61,36 +61,17 @@ class SuperQ(nn.Module):
         self.trainable_params = self.trainable_params()
         print("Trainable superq params:", self.trainable_params)
 
-    def sqscale(self):
-        # Enforce positive scales > 1e-5
-        return torch.clamp(self.raw_sqscale, min=1e-5)
+    def scale(self):
+        # Enforce positive scale
+        return torch.exp(self.raw_scale)
 
     def exponents(self):
         # Enforce exponent contraints for numerical stability
-        return torch.clamp(self.raw_exponents, min=0.01)
+        return torch.clamp(self.raw_exponents, min=0.1, max=1.9)
 
     def rotation(self):
-        """
-        Converts the stored 6D vectors back to a valid 3x3 rotation matrix 
-        using Gram-Schmidt orthogonalization.
-        """
-        a1 = self.raw_rotation[:, :, 0]
-        a2 = self.raw_rotation[:, :, 1]
-
-        # 1. Normalize the first vector
-        b1 = F.normalize(a1, dim=1)
-
-        # 2. Project second vector onto the first to make it orthogonal
-        # b2 = a2 - (b1 . a2) * b1
-        dot_prod = torch.sum(b1 * a2, dim=1, keepdim=True)
-        b2 = a2 - dot_prod * b1
-        b2 = F.normalize(b2, dim=1)
-
-        # 3. Compute the third vector using cross product
-        b3 = torch.cross(b1, b2, dim=1)
-
-        # Stack columns to form rotation matrix
-        return torch.stack([b1, b2, b3], dim=-1)
+        # Convert back to rotation matrix
+        return quat2mat(self.raw_rotation)
 
     def trainable_params(self):
         names = []
@@ -103,7 +84,7 @@ class SuperQ(nn.Module):
     def update_handler(self):
         batch_size = self.pred_handler.scale.shape[1]
         mask = self.mask.reshape(batch_size)
-        self.pred_handler.scale[self.idx][mask] = self.sqscale().detach().cpu().numpy()
+        self.pred_handler.scale[self.idx][mask] = self.scale().detach().cpu().numpy()
         self.pred_handler.exponents[self.idx][mask] = self.exponents().detach().cpu().numpy()
         self.pred_handler.rotation[self.idx][mask] = self.rotation().detach().cpu().numpy()
         self.pred_handler.translation[self.idx][mask] = self.translation.detach().cpu().numpy()
@@ -142,7 +123,7 @@ class SuperQ(nn.Module):
 
         # 2. Extract parameters for readability
         e1, e2 = self.exponents()[idx]
-        sx, sy, sz = self.sqscale()[idx]
+        sx, sy, sz = self.scale()[idx]
 
         # 3. Calculate radial distance from origin
         r0 = torch.linalg.norm(X, axis=0)
@@ -152,7 +133,7 @@ class SuperQ(nn.Module):
         term1 = ((x / sx)**2)**(1 / e2)
         term2 = ((y / sy)**2)**(1 / e2)
         term3 = ((z / sz)**2)**(1 / e1)
-        f = ( (term1 + term2)**(e2 / e1) + term3 )**(-e1 / 2)
+        f = ( (term1 + term2 + 1e-6)**(e2 / e1) + term3 )**(-e1 / 2)
 
         # 5. Compute Signed Distance
         sdf = r0 * (1 - f)
