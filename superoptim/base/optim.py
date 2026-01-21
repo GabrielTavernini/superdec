@@ -17,6 +17,27 @@ import matplotlib.pyplot as plt
 from .superq import SuperQ
 from ..utils import plot_pred_handler
 
+def visualize_handler(server, superq, sdf_values, plot = False):
+    sdf_values = sdf_values.detach().cpu().numpy()
+
+    points = superq.points.detach().cpu().numpy()
+    pred_handler, meshes = superq.update_handler()
+    if plot:
+        plot_pred_handler(pred_handler, superq.truncation)
+
+    mesh = meshes[0]
+    server.scene.add_mesh_trimesh("superquadrics", mesh=mesh, visible=True)
+
+    cmap = plt.get_cmap('RdBu')
+    norm = plt.Normalize(vmin=-superq.truncation, vmax=superq.truncation)
+    sdf_colors = cmap(norm(sdf_values))
+    sdf_colors = sdf_colors[:, :3]
+    server.scene.add_point_cloud(
+        name="/sdf_pointcloud",
+        points=points,
+        colors=sdf_colors,
+        point_size=0.005,
+    )
 
 def main():
     truncation = 0.05
@@ -32,6 +53,10 @@ def main():
     pred_handler, meshes = superq.update_handler()
     orig_mesh = meshes[0]
     plot_pred_handler(pred_handler, truncation, filename="superq_plot_orig.png")
+
+    server = viser.ViserServer()
+    server.scene.set_up_direction([0.0, 1.0, 0.0])
+    server.scene.add_mesh_trimesh("original_superquadrics", mesh=orig_mesh, visible=False)
 
     # torch.autograd.set_detect_anomaly(True)
     num_epochs = 1000
@@ -62,41 +87,11 @@ def main():
         loss.backward()
         # torch.nn.utils.clip_grad_norm_(superq.parameters(), max_norm=1.0)
         optimizer.step()
+
+        if epoch % 20 == 0:    
+            visualize_handler(server, superq, sdf_values, outside_values)
         pbar.set_postfix({"Lsdf": f"{Lsdf.item():.6f}", "Loss": f"{loss.item():.6f}"})
-    sdf_values = sdf_values.detach().cpu().numpy()
-    
-    pred_handler, meshes = superq.update_handler()
-    mesh = meshes[0]
-    plot_pred_handler(pred_handler, truncation)
-
-    cmap = plt.get_cmap('RdBu')
-    norm = plt.Normalize(vmin=-truncation, vmax=truncation)
-    sdf_colors = cmap(norm(sdf_values))
-    sdf_colors = sdf_colors[:, :3]
-
-    server = viser.ViserServer()
-    server.scene.add_mesh_trimesh("superquadrics_orig", mesh=orig_mesh, visible=False)
-
-    points = superq.points.detach().cpu().numpy()
-    assign_matrix = superq.assign_matrix.detach().cpu().numpy()
-    colors = generate_ncolors(assign_matrix.shape[0])
-    colored_pc = colors[np.argmax(assign_matrix, axis=0)]
-    server.scene.add_point_cloud(
-        name="/segmented_pointcloud_orig",
-        points=points,
-        colors=colored_pc,
-        point_size=0.005,
-        visible=False,
-    )
-
-    server.scene.add_mesh_trimesh("superquadrics", mesh=mesh, visible=True)
-    server.scene.add_point_cloud(
-        name="/segmented_pointcloud",
-        points=points,
-        colors=sdf_colors,
-        point_size=0.005,
-    )
-    server.scene.set_up_direction([0.0, 1.0, 0.0])
+    visualize_handler(server, superq, sdf_values, outside_values, plot=True)
 
     while True:
         time.sleep(10.0)
