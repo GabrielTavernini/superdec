@@ -41,7 +41,7 @@ def visualize_handler(server, superq, sdf_values, plot = False):
 
 def main():
     truncation = 0.05
-    pred_handler = PredictionHandler.from_npz("data/output_npz/objects/rect_table2.npz")
+    pred_handler = PredictionHandler.from_npz("data/output_npz/objects/rect_table.npz")
     superq = SuperQ(
         pred_handler=pred_handler,
         truncation=truncation,
@@ -58,8 +58,20 @@ def main():
     server.scene.set_up_direction([0.0, 1.0, 0.0])
     server.scene.add_mesh_trimesh("original_superquadrics", mesh=orig_mesh, visible=False)
 
+    points = superq.points.detach().cpu().numpy()
+    assign_matrix = superq.assign_matrix.detach().cpu().numpy()
+    colors = generate_ncolors(assign_matrix.shape[0])
+    colored_pc = colors[np.argmax(assign_matrix, axis=0)]
+    server.scene.add_point_cloud(
+        name="/segmented_pointcloud",
+        points=points,
+        colors=colored_pc,
+        point_size=0.005,
+        visible=False,
+    )
+
     # torch.autograd.set_detect_anomaly(True)
-    num_epochs = 1000
+    num_epochs = 5000
     weight_pos = 2.0
     weight_neg = 1.0
     weight_scale = 0.01
