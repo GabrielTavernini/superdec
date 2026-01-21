@@ -14,19 +14,20 @@ from superdec.utils.visualizations import generate_ncolors
 from tqdm import tqdm
 import matplotlib.pyplot as plt
 
-from superq import SuperQ
-from utils import plot_pred_handler
+from .superq import SuperQ
+from ..utils import plot_pred_handler
 
 
 def main():
     truncation = 0.05
-    pred_handler = PredictionHandler.from_npz("data/output_npz/objects/round_table6.npz")
+    pred_handler = PredictionHandler.from_npz("data/output_npz/objects/rect_table.npz")
     superq = SuperQ(
         pred_handler=pred_handler,
         truncation=truncation,
         # ply="examples/chair.ply"
     )
-    optimizer = torch.optim.Adam(superq.parameters(), lr=1e-3)
+    param_groups = superq.get_param_groups()
+    optimizer = torch.optim.Adam(param_groups)
     
     pred_handler, meshes = superq.update_handler()
     orig_mesh = meshes[0]
@@ -36,7 +37,7 @@ def main():
     num_epochs = 1000
     weight_pos = 2.0
     weight_neg = 1.0
-    weight_scale = 0.1
+    weight_scale = 0.01
     pbar = tqdm(range(num_epochs), desc="Fitting Superquadrics")
     for epoch in pbar:
         optimizer.zero_grad()
@@ -49,8 +50,9 @@ def main():
         Lsdf = weight_pos * torch.mean(pos_part) + weight_neg * torch.mean(torch.abs(neg_part))
         Lsdf /= weight_pos + weight_neg
         
-        volumes = torch.prod(superq.scale(), dim=1)
-        Lreg = weight_scale * torch.mean(volumes)
+        # volumes = torch.prod(superq.scale(), dim=1)
+        # Lreg = weight_scale * torch.mean(volumes)
+        Lreg = weight_scale * torch.norm(superq.scale(), p=1, dim=1).mean()
         
         loss = Lsdf + Lreg
         if torch.isnan(loss):

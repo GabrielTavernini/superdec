@@ -7,7 +7,7 @@ import math
 from typing import Optional, assert_never
 from dataclasses import dataclass
 
-from utils import quat2mat, mat2quat
+from ..utils import quat2mat, mat2quat
 from superdec.utils.predictions_handler import PredictionHandler
 
 class SuperQ(nn.Module):
@@ -28,7 +28,8 @@ class SuperQ(nn.Module):
         self.mask = (pred_handler.exist[self.idx] > 0.5).reshape(-1)
         raw_scale = torch.tensor(pred_handler.scale[self.idx].reshape(-1, 3)[self.mask], dtype=torch.float, device=device)
         self.raw_scale = torch.log(raw_scale)
-        self.raw_exponents = torch.tensor(pred_handler.exponents[self.idx].reshape(-1, 2)[self.mask], dtype=torch.float, device=device)
+        raw_exponents = torch.tensor(pred_handler.exponents[self.idx].reshape(-1, 2)[self.mask], dtype=torch.float, device=device)
+        self.raw_exponents = torch.logit(raw_exponents)
         rot_mat = torch.tensor(pred_handler.rotation[self.idx].reshape(-1, 3, 3)[self.mask], dtype=torch.float, device=device)
         self.raw_rotation = mat2quat(rot_mat) # Shape (N, 3)
         self.translation = torch.tensor(pred_handler.translation[self.idx].reshape(-1, 3)[self.mask], dtype=torch.float, device=device)
@@ -67,7 +68,8 @@ class SuperQ(nn.Module):
 
     def exponents(self):
         # Enforce exponent contraints for numerical stability
-        return torch.clamp(self.raw_exponents, min=0.1, max=1.9)
+        minE, maxE = 0.1, 1.9
+        return (torch.sigmoid(self.raw_exponents) * (maxE - minE)) + minE
 
     def rotation(self):
         # Convert back to rotation matrix
@@ -80,6 +82,18 @@ class SuperQ(nn.Module):
             if isinstance(v, torch.Tensor):
                 names.append(k)
         return names
+
+    def get_param_groups(self):
+        groups = []
+        for name, param in self.named_parameters():
+            if not param.requires_grad:
+                continue
+            if "raw_exponents" in name:
+                lr = 1e-2
+            else:
+                lr =  1e-3
+            groups.append({"params": [param], "lr": lr})
+        return groups
 
     def update_handler(self):
         batch_size = self.pred_handler.scale.shape[1]
