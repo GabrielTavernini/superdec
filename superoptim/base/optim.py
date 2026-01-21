@@ -42,6 +42,7 @@ def visualize_handler(server, superq, sdf_values, plot = False):
 def main():
     truncation = 0.05
     pred_handler = PredictionHandler.from_npz("data/output_npz/objects/rect_table.npz")
+    print(f"Optimizing {pred_handler.names[0]}")
     superq = SuperQ(
         pred_handler=pred_handler,
         truncation=truncation,

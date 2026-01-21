@@ -106,17 +106,6 @@ class SuperQ(nn.Module):
         return self.pred_handler, meshes
 
     def sdf(self, idx):
-        """
-        Computes the Signed Distance Function for a Superquadric.
-        
-        Args:
-            points: (3, N) array of query points.
-            scale_vec: (3,) array [sx, sy, sz].
-            exponents: (2,) array [e1, e2].
-            translation: (3,) array [tx, ty, tz].
-            rotation_matrix: (3, 3) rotation matrix.
-            truncation: float, distance limit (0 to disable).
-        """
         # 1. Transform points to local coordinate system
         # X = R' * (points - t)
         # Note: rotation_matrix.T is equivalent to R'

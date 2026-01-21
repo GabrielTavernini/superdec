@@ -75,7 +75,6 @@ class SuperQ(nn.Module):
                 mask = (distances >= curr_length - 1e-4)
                 outside_points.append(new_points[mask])
             self.outside_points = torch.cat(outside_points, dim=0)
-            print(self.outside_points.shape)
 
         self.pred_handler = pred_handler
         self.truncation = truncation

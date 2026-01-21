@@ -69,8 +69,8 @@ def main():
     superq = SuperQ(
         pred_handler=pred_handler,
         truncation=truncation,
-        use_full_pointcloud=True,
-        ply="data/ShapeNet/04379243/d1296da8d3a45ac88aaae3d020f5ddf8/pointcloud.npz",
+        # use_full_pointcloud=True,
+        ply=f"data/ShapeNet/04379243/{pred_handler.names[0]}/pointcloud.npz",
     )
     param_groups = superq.get_param_groups()
     optimizer = torch.optim.Adam(param_groups)
