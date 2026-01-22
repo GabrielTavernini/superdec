@@ -90,6 +90,8 @@ class SuperQ(nn.Module):
                 continue
             if "raw_exponents" in name:
                 lr = 1e-2
+            elif "raw_scale" in name:
+                lr = 5e-2
             else:
                 lr =  1e-3
             groups.append({"params": [param], "lr": lr})

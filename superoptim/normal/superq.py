@@ -6,7 +6,6 @@ import open3d as o3d
 import math
 from typing import Optional, assert_never
 from dataclasses import dataclass
-import gc
 
 from ..utils import quat2mat, mat2quat
 from superdec.utils.predictions_handler import PredictionHandler
@@ -16,10 +15,8 @@ class SuperQ(nn.Module):
         self, 
         pred_handler: PredictionHandler,
         truncation: float = 0.1,
-        ply: str = None,
-        load_normals: bool = True,
-        use_full_pointcloud: bool = False,
         use_segmentation: bool = False,
+        ply: str = None,
         idx: int = 0,
         device: str = "cuda",
     ):
@@ -42,42 +39,13 @@ class SuperQ(nn.Module):
         self.points = torch.tensor(np.array(pred_handler.get_segmented_pcs()[self.idx].points), dtype=torch.float, device=device) # [4096, 3]
         
         if ply:
-            if ply.endswith("ply"):
-                pcd = o3d.io.read_point_cloud(ply) 
-                ply_points = torch.tensor(np.array(pcd.points), dtype=torch.float, device=device) 
-            elif ply.endswith("npz"):
-                data = np.load(ply)
-                ply_points = torch.tensor(np.array(data['points']), dtype=torch.float, device=device) 
-                self.normals = torch.tensor(np.array(data['normals']), dtype=torch.float, device=device) 
-            else:
-                print("Cannot load pointcloud")
-                exit()
-
-            og_points = self.points
-            if use_full_pointcloud:
-                distances = torch.cdist(ply_points, self.points)
-                nearest_indices = torch.argmin(distances, dim=1)
-                full_assign_matrix = self.assign_matrix[:, nearest_indices]
-                self.assign_matrix = full_assign_matrix
-                self.points = ply_points
-            elif load_normals:
-                distances = torch.cdist(self.points, ply_points)
-                closest_ply_indices = torch.argmin(distances, dim=1)
-                self.normals = self.normals[closest_ply_indices]
-
-            outside_points = []
-            self.line_length = 0.01
-            tmp_points = self.points
-            for i in range(3):
-                curr_length = self.line_length * ((i+1)**2)
-                print(curr_length)
-                tmp_points = tmp_points + (self.normals * curr_length)
-                distances = torch.cdist(tmp_points, og_points) # using all points leads to OOM
-                distances = torch.min(distances, dim=1).values
-                mask = (distances >= curr_length - 1e-4)
-                outside_points.append(tmp_points[mask])
-            self.outside_points = torch.cat(outside_points, dim=0)
-            print(f"Using {self.outside_points.shape[0]} outside points")
+            data = np.load(ply)
+            ply_points = torch.tensor(np.array(data['points']), dtype=torch.float, device=device) 
+            self.normals = torch.tensor(np.array(data['normals']), dtype=torch.float, device=device) 
+            
+            distances = torch.cdist(self.points, ply_points)
+            closest_ply_indices = torch.argmin(distances, dim=1)
+            self.normals = self.normals[closest_ply_indices]
 
         self.pred_handler = pred_handler
         self.truncation = truncation
@@ -123,7 +91,7 @@ class SuperQ(nn.Module):
             if "raw_exponents" in name:
                 lr = 1e-2
             elif "raw_scale" in name:
-                lr = 5e-2
+                lr =  5e-2
             else:
                 lr =  1e-3
             groups.append({"params": [param], "lr": lr})
@@ -139,10 +107,17 @@ class SuperQ(nn.Module):
         meshes = self.pred_handler.get_meshes(resolution=30)
         return self.pred_handler, meshes
 
-    def sdf(self, idx, points):
+    def sdf(self, idx):
         # 1. Transform points to local coordinate system
         # X = R' * (points - t)
         # Note: rotation_matrix.T is equivalent to R'
+        if self.use_segmentation:
+            p_mask = (self.assign_matrix[idx] == 1)
+            points_raw = self.points[p_mask].T
+        else:
+            points_raw = self.points.T
+            
+        points = points_raw.detach().clone().requires_grad_(True)
         points_centered = points - self.translation[idx][:, None]
         X = self.rotation()[idx].T @ points_centered
         
@@ -170,27 +145,36 @@ class SuperQ(nn.Module):
         # 5. Compute Signed Distance
         sdf = r0 * (1 - f)
 
+        d_points = torch.autograd.grad(
+            outputs=sdf,
+            inputs=points,
+            grad_outputs=torch.ones_like(sdf),
+            create_graph=False, # Set True if you need higher-order derivatives (Hessian)
+            retain_graph=True,
+            only_inputs=True
+        )[0]
+        normals = torch.nn.functional.normalize(d_points, dim=0).T
+
         # 6. Apply truncation
         if self.truncation != 0:
             sdf = torch.clip(sdf, -self.truncation, self.truncation)
 
-        return sdf
+        return sdf, normals
 
 
     def forward(self):
         if self.use_segmentation:
             sdf_values = torch.zeros(self.points.shape[0], device=self.device)
+            normals = torch.zeros(self.points.shape, device=self.device)
             for i in range(self.N):
                 p_mask = (self.assign_matrix[i] == 1)
-                sdf_values[p_mask] = self.sdf(i, self.points[p_mask].T)
+                sdf_values[p_mask], normals[p_mask] = self.sdf(i)
         else:
-            sdf_values = self.sdf(0, self.points.T)
+            sdf_values, normals = self.sdf(0)
             for i in range(1, self.N):
-                sdf_values = torch.minimum(self.sdf(i, self.points.T), sdf_values)
-
-        if hasattr(self, 'outside_points'):
-            outside_values = self.sdf(0, self.outside_points.T)
-            for i in range(1, self.N):
-                outside_values = torch.minimum(self.sdf(i, self.outside_points.T), outside_values)
-            return sdf_values, outside_values
-        return sdf_values
+                curr_sdf, curr_normals = self.sdf(i)
+                mask = curr_sdf < sdf_values
+                sdf_values = torch.where(mask, curr_sdf, sdf_values)
+                normals = torch.where(mask.unsqueeze(1), curr_normals, normals)
+        return sdf_values, normals
+        
