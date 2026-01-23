@@ -9,6 +9,7 @@ from dataclasses import dataclass
 import gc
 
 from ..utils import quat2mat, mat2quat
+from superdec.utils.safe_operations import safe_pow, safe_mul
 from superdec.utils.predictions_handler import PredictionHandler
 
 class SuperQ(nn.Module):
@@ -163,13 +164,13 @@ class SuperQ(nn.Module):
 
         # 4. Calculate the Superquadric scaling function
         # Formula components: (((x/sx)^2)^(1/e2) + ((y/sy)^2)^(1/e2))^(e2/e1) + ((z/sz)^2)^(1/e1)
-        term1 = ((x / sx)**2)**(1 / e2)
-        term2 = ((y / sy)**2)**(1 / e2)
-        term3 = ((z / sz)**2)**(1 / e1)
-        f = ( (term1 + term2 + 1e-6)**(e2 / e1) + term3 )**(-e1 / 2)
+        term1 = safe_pow(safe_pow(x / sx, 2), 1 / e2)
+        term2 = safe_pow(safe_pow(y / sy, 2), 1 / e2)
+        term3 = safe_pow(safe_pow(z / sz, 2), 1 / e1)
+        f = safe_pow(safe_pow(term1 + term2, e2 / e1) + term3, -e1 / 2)
 
         # 5. Compute Signed Distance
-        sdf = r0 * (1 - f)
+        sdf = safe_mul(r0, (1 - f))
 
         # 6. Apply truncation
         if self.truncation != 0:
