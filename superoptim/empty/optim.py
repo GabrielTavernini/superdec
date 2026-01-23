@@ -64,7 +64,7 @@ def visualize_handler(server, superq, sdf_values, outside_values, plot = False):
 
 def main():
     truncation = 0.05
-    pred_handler = PredictionHandler.from_npz("data/output_npz/objects/rect_table.npz")
+    pred_handler = PredictionHandler.from_npz("data/output_npz/objects/low_table.npz")
     print(f"Optimizing {pred_handler.names[0]}")
     superq = SuperQ(
         pred_handler=pred_handler,
@@ -110,12 +110,10 @@ def main():
         neg_part = torch.clamp(sdf_values, max=0)
         Lsdf = weight_pos * torch.mean(pos_part) + weight_neg * torch.mean(torch.abs(neg_part))
         Lsdf /= weight_pos + weight_neg
-        
-        # volumes = torch.prod(superq.scale(), dim=1)
-        # Lreg = 2 * torch.mean(volumes)
+
         Lreg = 0.005 * torch.norm(superq.scale(), p=1, dim=1).mean()
 
-        Lempty = 0.5 * torch.relu(-outside_values).mean()
+        Lempty = 0.5 * torch.relu(-(outside_values)).mean()
         
         loss = Lsdf + Lreg + Lempty
         if torch.isnan(loss):

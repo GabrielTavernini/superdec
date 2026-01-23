@@ -17,9 +17,7 @@ class SuperQ(nn.Module):
         pred_handler: PredictionHandler,
         truncation: float = 0.1,
         ply: str = None,
-        load_normals: bool = True,
         use_full_pointcloud: bool = False,
-        use_segmentation: bool = False,
         idx: int = 0,
         device: str = "cuda",
     ):
@@ -37,47 +35,50 @@ class SuperQ(nn.Module):
         self.raw_rotation = mat2quat(rot_mat) # Shape (N, 3)
         self.translation = torch.tensor(pred_handler.translation[self.idx].reshape(-1, 3)[self.mask], dtype=torch.float, device=device)
         
-        self.use_segmentation = use_segmentation
         self.assign_matrix = torch.tensor(pred_handler.assign_matrix[self.idx].T[self.mask], dtype=torch.float, device=device).squeeze() # [N, 4096]
         self.points = torch.tensor(np.array(pred_handler.get_segmented_pcs()[self.idx].points), dtype=torch.float, device=device) # [4096, 3]
         
-        if ply:
-            if ply.endswith("ply"):
-                pcd = o3d.io.read_point_cloud(ply) 
-                ply_points = torch.tensor(np.array(pcd.points), dtype=torch.float, device=device) 
-            elif ply.endswith("npz"):
-                data = np.load(ply)
-                ply_points = torch.tensor(np.array(data['points']), dtype=torch.float, device=device) 
-                self.normals = torch.tensor(np.array(data['normals']), dtype=torch.float, device=device) 
-            else:
-                print("Cannot load pointcloud")
-                exit()
+        if ply.endswith("ply"):
+            pcd = o3d.io.read_point_cloud(ply) 
+            ply_points = torch.tensor(np.array(pcd.points), dtype=torch.float, device=device) 
+        elif ply.endswith("npz"):
+            data = np.load(ply)
+            ply_points = torch.tensor(np.array(data['points']), dtype=torch.float, device=device) 
+            self.normals = torch.tensor(np.array(data['normals']), dtype=torch.float, device=device) 
+        else:
+            print("Cannot load pointcloud")
+            exit()
 
-            og_points = self.points
-            if use_full_pointcloud:
-                distances = torch.cdist(ply_points, self.points)
-                nearest_indices = torch.argmin(distances, dim=1)
-                full_assign_matrix = self.assign_matrix[:, nearest_indices]
-                self.assign_matrix = full_assign_matrix
-                self.points = ply_points
-            elif load_normals:
-                distances = torch.cdist(self.points, ply_points)
-                closest_ply_indices = torch.argmin(distances, dim=1)
-                self.normals = self.normals[closest_ply_indices]
+        og_points = self.points
+        if use_full_pointcloud:
+            distances = torch.cdist(ply_points, self.points)
+            nearest_indices = torch.argmin(distances, dim=1)
+            full_assign_matrix = self.assign_matrix[:, nearest_indices]
+            self.assign_matrix = full_assign_matrix
+            self.points = ply_points
 
-            outside_points = []
-            self.line_length = 0.01
-            tmp_points = self.points
-            for i in range(3):
-                curr_length = self.line_length * ((i+1)**2)
-                print(curr_length)
-                tmp_points = tmp_points + (self.normals * curr_length)
-                distances = torch.cdist(tmp_points, og_points) # using all points leads to OOM
-                distances = torch.min(distances, dim=1).values
-                mask = (distances >= curr_length - 1e-4)
-                outside_points.append(tmp_points[mask])
-            self.outside_points = torch.cat(outside_points, dim=0)
-            print(f"Using {self.outside_points.shape[0]} outside points")
+        distances = torch.cdist(self.points, ply_points)
+        closest_ply_indices = torch.argmin(distances, dim=1)
+        self.normals = self.normals[closest_ply_indices]
+
+        outside_points = []
+        self.line_length = 0.01
+        tmp_points, tmp_normals = self.points, self.normals
+        decay_rate = 0.5
+        for i in range(3):
+            tmp_points = tmp_points + (tmp_normals * self.line_length)
+            distances = torch.cdist(tmp_points, og_points) # using all points leads to OOM
+            distances = torch.min(distances, dim=1).values
+            mask = (distances >= (self.line_length * (i+1)) - 1e-4)
+            
+            valid_indices = torch.nonzero(mask).squeeze()
+            num_valid = valid_indices.numel()
+            num_to_sample = max(1, int(num_valid * (decay_rate if i > 0 else 1)))
+            selected_indices = valid_indices[torch.randperm(num_valid)[:num_to_sample]]
+            tmp_points, tmp_normals = tmp_points[selected_indices], tmp_normals[selected_indices]
+            outside_points.append(tmp_points)
+        self.outside_points = torch.cat(outside_points, dim=0)
+        print(f"Using {self.outside_points.shape[0]} outside points")
 
         self.pred_handler = pred_handler
         self.truncation = truncation
@@ -178,19 +179,8 @@ class SuperQ(nn.Module):
 
 
     def forward(self):
-        if self.use_segmentation:
-            sdf_values = torch.zeros(self.points.shape[0], device=self.device)
-            for i in range(self.N):
-                p_mask = (self.assign_matrix[i] == 1)
-                sdf_values[p_mask] = self.sdf(i, self.points[p_mask].T)
-        else:
-            sdf_values = self.sdf(0, self.points.T)
-            for i in range(1, self.N):
-                sdf_values = torch.minimum(self.sdf(i, self.points.T), sdf_values)
-
-        if hasattr(self, 'outside_points'):
-            outside_values = self.sdf(0, self.outside_points.T)
-            for i in range(1, self.N):
-                outside_values = torch.minimum(self.sdf(i, self.outside_points.T), outside_values)
-            return sdf_values, outside_values
-        return sdf_values
+        all_points = torch.cat([self.points, self.outside_points], dim=0)
+        sdf_values = self.sdf(0, all_points.T)
+        for i in range(1, self.N):
+            sdf_values = torch.minimum(self.sdf(i, all_points.T), sdf_values)
+        return sdf_values[:self.points.shape[0]], sdf_values[self.points.shape[0]:]
