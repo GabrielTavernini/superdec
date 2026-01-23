@@ -10,7 +10,7 @@ import gc
 
 from ..utils import quat2mat, mat2quat
 from superdec.utils.safe_operations import safe_pow, safe_mul
-from superdec.utils.predictions_handler import PredictionHandler
+from superdec.utils.predictions_handler_extended import PredictionHandler
 
 class SuperQ(nn.Module):
     def __init__(
@@ -23,11 +23,13 @@ class SuperQ(nn.Module):
         device: str = "cuda",
     ):
         # Anything self.x = nn.Parameter(...) is trainable
-        trainable = ["raw_scale", "raw_exponents", "raw_rotation", "translation"]
+        trainable = ["raw_scale", "raw_exponents", "raw_rotation", "raw_tapering", "translation"]
 
         super().__init__()
         self.idx = idx
         self.mask = (pred_handler.exist[self.idx] > 0.5).reshape(-1)
+        self.N = self.mask.sum()
+
         raw_scale = torch.tensor(pred_handler.scale[self.idx].reshape(-1, 3)[self.mask], dtype=torch.float, device=device)
         self.raw_scale = torch.log(raw_scale)
         raw_exponents = torch.tensor(pred_handler.exponents[self.idx].reshape(-1, 2)[self.mask], dtype=torch.float, device=device)
@@ -35,20 +37,24 @@ class SuperQ(nn.Module):
         rot_mat = torch.tensor(pred_handler.rotation[self.idx].reshape(-1, 3, 3)[self.mask], dtype=torch.float, device=device)
         self.raw_rotation = mat2quat(rot_mat) # Shape (N, 3)
         self.translation = torch.tensor(pred_handler.translation[self.idx].reshape(-1, 3)[self.mask], dtype=torch.float, device=device)
-        
+        self.raw_tapering = torch.full((self.N, 2), 1e-4, dtype=torch.float, device=device)
+
         self.assign_matrix = torch.tensor(pred_handler.assign_matrix[self.idx].T[self.mask], dtype=torch.float, device=device).squeeze() # [N, 4096]
         self.points = torch.tensor(pred_handler.pc[self.idx], dtype=torch.float, device=device) # [4096, 3]
         
-        if ply.endswith("ply"):
-            pcd = o3d.io.read_point_cloud(ply) 
-            ply_points = torch.tensor(np.array(pcd.points), dtype=torch.float, device=device) 
-        elif ply.endswith("npz"):
+        if ply and ply.endswith("npz"):
             data = np.load(ply)
             ply_points = torch.tensor(np.array(data['points']), dtype=torch.float, device=device) 
-            self.normals = torch.tensor(np.array(data['normals']), dtype=torch.float, device=device) 
+            ply_normals = torch.tensor(np.array(data['normals']), dtype=torch.float, device=device) 
+
+            distances = torch.cdist(self.points, ply_points)
+            closest_ply_indices = torch.argmin(distances, dim=1)
+            self.normals = ply_normals[closest_ply_indices]
         else:
-            print("Cannot load pointcloud")
-            exit()
+            pc_o3d = o3d.geometry.PointCloud()
+            pc_o3d.points = o3d.utility.Vector3dVector(self.points.detach().cpu().numpy())
+            pc_o3d.estimate_normals()
+            self.normals = torch.tensor(np.array(pc_o3d.normals), dtype=torch.float, device=device) 
 
         og_points = self.points
         if use_full_pointcloud:
@@ -57,10 +63,7 @@ class SuperQ(nn.Module):
             full_assign_matrix = self.assign_matrix[:, nearest_indices]
             self.assign_matrix = full_assign_matrix
             self.points = ply_points
-
-        distances = torch.cdist(self.points, ply_points)
-        closest_ply_indices = torch.argmin(distances, dim=1)
-        self.normals = self.normals[closest_ply_indices]
+            self.normals = ply_normals
 
         outside_points = []
         self.line_length = 0.01
@@ -84,8 +87,6 @@ class SuperQ(nn.Module):
         self.pred_handler = pred_handler
         self.truncation = truncation
         self.device = device
-
-        self.N = self.mask.sum()
         print(f"Loaded {self.N} superquadircs.")
 
         # Turn selected attributes into trainable parameters
@@ -108,6 +109,10 @@ class SuperQ(nn.Module):
     def rotation(self):
         # Convert back to rotation matrix
         return quat2mat(self.raw_rotation)
+    
+    def tapering(self):
+        # Enforce tapering constraints
+        return torch.tanh(self.raw_tapering)
 
     def trainable_params(self):
         names = []
@@ -118,16 +123,19 @@ class SuperQ(nn.Module):
         return names
 
     def get_param_groups(self):
+        lrs = {
+            "raw_scale": 5e-2,
+            "raw_exponents": 1e-2,
+            "raw_tapering": 5e-4,
+        }
         groups = []
         for name, param in self.named_parameters():
             if not param.requires_grad:
                 continue
-            if "raw_exponents" in name:
-                lr = 1e-2
-            elif "raw_scale" in name:
-                lr = 5e-2
-            else:
-                lr =  1e-3
+            if name in lrs:
+                lr = lrs[name]
+            else: 
+                lr = 1e-3
             groups.append({"params": [param], "lr": lr})
         return groups
 
@@ -136,6 +144,7 @@ class SuperQ(nn.Module):
         mask = self.mask.reshape(batch_size)
         self.pred_handler.scale[self.idx][mask] = self.scale().detach().cpu().numpy()
         self.pred_handler.exponents[self.idx][mask] = self.exponents().detach().cpu().numpy()
+        self.pred_handler.tapering[self.idx][mask] = self.tapering().detach().cpu().numpy()
         self.pred_handler.rotation[self.idx][mask] = self.rotation().detach().cpu().numpy()
         self.pred_handler.translation[self.idx][mask] = self.translation.detach().cpu().numpy()
         meshes = self.pred_handler.get_meshes(resolution=30)
@@ -148,16 +157,24 @@ class SuperQ(nn.Module):
         points_centered = points - self.translation[idx][:, None]
         X = self.rotation()[idx].T @ points_centered
         
+        # 2. Extract parameters for readability
+        e1, e2 = self.exponents()[idx]
+        sx, sy, sz = self.scale()[idx]
+        
         # Fix numerical instability at 0
         x, y, z = X[0, :], X[1, :], X[2, :]
         x = ((x > 0).float() * 2 - 1) * torch.max(torch.abs(x), x.new_tensor(1e-6))
         y = ((y > 0).float() * 2 - 1) * torch.max(torch.abs(y), x.new_tensor(1e-6))
         z = ((z > 0).float() * 2 - 1) * torch.max(torch.abs(z), x.new_tensor(1e-6))
+        
+        # Apply tapering
+        kx, ky = self.tapering()[idx]
+        fx = safe_mul(kx/sz, z) + 1
+        fy = safe_mul(ky/sz, z) + 1
+        x = x/fx
+        y = y/fx
+        
         X = torch.stack([x, y, z], dim=0)
-
-        # 2. Extract parameters for readability
-        e1, e2 = self.exponents()[idx]
-        sx, sy, sz = self.scale()[idx]
 
         # 3. Calculate radial distance from origin
         r0 = torch.linalg.norm(X, axis=0)
@@ -173,14 +190,24 @@ class SuperQ(nn.Module):
         sdf = safe_mul(r0, (1 - f))
 
         # 6. Apply truncation
-        if self.truncation != 0:
-            sdf = torch.clip(sdf, -self.truncation, self.truncation)
+        # if self.truncation != 0:
+        #     sdf = torch.clip(sdf, -self.truncation, self.truncation)
 
         return sdf
 
+    # def forward(self):
+    #     all_points = torch.cat([self.points, self.outside_points], dim=0)
+    #     sdf_values = self.sdf(0, all_points.T)
+    #     for i in range(1, self.N):
+    #         sdf_values = torch.minimum(self.sdf(i, all_points.T), sdf_values)
+    #     if self.truncation != 0:
+    #         sdf_values = torch.clip(sdf_values, -self.truncation, self.truncation)
+    #     return sdf_values[:self.points.shape[0]], sdf_values[self.points.shape[0]:]
+
     def forward(self):
         all_points = torch.cat([self.points, self.outside_points], dim=0)
-        sdf_values = self.sdf(0, all_points.T)
-        for i in range(1, self.N):
-            sdf_values = torch.minimum(self.sdf(i, all_points.T), sdf_values)
+        all_sdfs = torch.stack([self.sdf(i, all_points.T) for i in range(self.N)])
+        weights = F.softmax(-100.0 * all_sdfs, dim=0)
+        all_sdfs = torch.clip(all_sdfs, -self.truncation, self.truncation)
+        sdf_values = torch.sum(weights * all_sdfs, dim=0)
         return sdf_values[:self.points.shape[0]], sdf_values[self.points.shape[0]:]
