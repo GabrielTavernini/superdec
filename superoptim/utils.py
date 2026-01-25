@@ -93,7 +93,6 @@ def plot_pred_handler(pred_handler, truncation, wolrd_y=0.15, filename="superq_p
     plot_sdf_multi_slice(wolrd_y, truncation, sqscale, exponents, translation, rotation, filename=filename)
 
 # https://behavior.stanford.edu/reference/utils/transform_utils.html#utils.transform_utils.mat2quat
-@torch.compile
 def mat2quat(rmat: torch.Tensor) -> torch.Tensor:
     """
     Converts given rotation matrix to quaternion.
@@ -166,7 +165,6 @@ def mat2quat(rmat: torch.Tensor) -> torch.Tensor:
     return quat
 
 # https://behavior.stanford.edu/reference/utils/transform_utils.html#utils.transform_utils.quat2mat
-@torch.compile
 def quat2mat(quaternion):
     """
     Convert quaternions into rotation matrices.
