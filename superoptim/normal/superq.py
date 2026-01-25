@@ -143,7 +143,7 @@ class SuperQ(nn.Module):
         f = ( (term1 + term2 + 1e-6)**(e2 / e1) + term3 )**(-e1 / 2)
 
         # 5. Compute Signed Distance
-        sdf = r0 * (1 - f)
+        sdf = 1 - f
 
         d_points = torch.autograd.grad(
             outputs=sdf,
@@ -154,6 +154,7 @@ class SuperQ(nn.Module):
             only_inputs=True
         )[0]
         normals = torch.nn.functional.normalize(d_points, dim=0).T
+        sdf = r0 * sdf
 
         # 6. Apply truncation
         if self.truncation != 0:
