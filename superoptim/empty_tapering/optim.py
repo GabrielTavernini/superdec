@@ -14,7 +14,7 @@ from superdec.utils.visualizations import generate_ncolors
 from tqdm import tqdm
 import matplotlib.pyplot as plt
 
-from .superq import SuperQ
+from .batch_superq import SuperQ
 from ..utils import plot_pred_handler
 
 def visualize_handler(server, superq, sdf_values, outside_values, plot = False):
@@ -65,7 +65,7 @@ def visualize_handler(server, superq, sdf_values, outside_values, plot = False):
 def main():
     truncation = 0.05
     # pred_handler = PredictionHandler.from_npz("data/output_npz/sq.npz")
-    pred_handler = PredictionHandler.from_npz("data/output_npz/objects/rect_table3.npz")
+    pred_handler = PredictionHandler.from_npz("data/output_npz/objects/low_table3.npz")
     print(f"Optimizing {pred_handler.names[0]}")
     superq = SuperQ(
         pred_handler=pred_handler,
