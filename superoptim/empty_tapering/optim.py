@@ -7,6 +7,7 @@ from superdec.utils.predictions_handler_extended import PredictionHandler
 from superdec.data.dataloader import denormalize_outdict, denormalize_points
 import open3d as o3d
 import viser
+import random
 from superdec.data.dataloader import normalize_points, denormalize_outdict
 from superdec.data.transform import rotate_around_axis
 import time
@@ -44,14 +45,6 @@ def visualize_handler(server, superq, sdf_values, outside_values, plot = False):
         outside_values = outside_values.detach().cpu().numpy()
         p1 = points
         p2 = superq.outside_points.detach().cpu().numpy()
-        # line_segments = np.stack([p1, p2[:p1.shape[0],:]], axis=1)
-
-        # server.scene.add_line_segments(
-        #     name="/normals",
-        #     points=line_segments,
-        #     colors=np.array([0.0, 1.0, 0.0]),
-        #     line_width=0.75,
-        # )
 
         outside_colors = cmap(norm(outside_values))
         outside_colors = outside_colors[:, :3]
@@ -65,7 +58,7 @@ def visualize_handler(server, superq, sdf_values, outside_values, plot = False):
 def main():
     truncation = 0.05
     # pred_handler = PredictionHandler.from_npz("data/output_npz/sq.npz")
-    pred_handler = PredictionHandler.from_npz("data/output_npz/objects/low_table3.npz")
+    pred_handler = PredictionHandler.from_npz("data/output_npz/objects/round_table6.npz")
     print(f"Optimizing {pred_handler.names[0]}")
     superq = SuperQ(
         pred_handler=pred_handler,
@@ -111,18 +104,16 @@ def main():
     pbar = tqdm(range(num_epochs), desc="Fitting Superquadrics")
     for epoch in pbar:
         optimizer.zero_grad()
-        
-        sdf_values, outside_values = superq.forward()
-        # loss = torch.mean(torch.abs(sdf_values))
+        sdf_values, outside_values, counts_points, counts_outside = superq.forward()
 
         pos_part = torch.clamp(sdf_values, min=0)
         neg_part = torch.clamp(sdf_values, max=0)
         Lsdf = weight_pos * torch.mean(pos_part) + weight_neg * torch.mean(torch.abs(neg_part))
         Lsdf /= weight_pos + weight_neg
         
-        # volumes = torch.prod(superq.scale(), dim=1)
-        # Lreg = 2 * torch.mean(volumes)
-        Lreg = 0.005 * torch.norm(superq.scale(), p=1, dim=1).mean()
+        outside_ratio = counts_outside / (counts_points + counts_outside + 1e-6)
+        scale_weights = 1 + 10.0 * outside_ratio
+        Lreg = 0.005 * torch.mean(scale_weights * torch.norm(superq.scale(), p=1, dim=1))
 
         Lempty = 0.5 * torch.relu(-outside_values).mean()
         
@@ -144,4 +135,7 @@ def main():
         time.sleep(10.0)
 
 if __name__ == "__main__":
+    torch.manual_seed(0)
+    np.random.seed(0)
+    random.seed(0)
     main()

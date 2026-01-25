@@ -6,6 +6,7 @@ from superdec.utils.predictions_handler_extended import PredictionHandler
 from superdec.utils.evaluation import get_outdict
 from .batch_superq import SuperQ
 import viser
+import random
 
 def main():
     input_npz = "data/output_npz/shapenet_test.npz"
@@ -76,15 +77,17 @@ def main():
         for epoch in range(num_epochs):
             optimizer.zero_grad()
             
-            sdf_values, outside_values = superq.forward()
-            
+            sdf_values, outside_values, counts_points, counts_outside = superq.forward()
+
             pos_part = torch.clamp(sdf_values, min=0)
             neg_part = torch.clamp(sdf_values, max=0)
             Lsdf = weight_pos * torch.mean(pos_part) + weight_neg * torch.mean(torch.abs(neg_part))
-            Lsdf /= (weight_pos + weight_neg)
+            Lsdf /= weight_pos + weight_neg
             
-            # Additional losses
-            Lreg = 0.005 * torch.norm(superq.scale(), p=1, dim=1).mean()
+            outside_ratio = counts_outside / (counts_points + counts_outside + 1e-6)
+            scale_weights = 1 + 10.0 * outside_ratio
+            Lreg = 0.005 * torch.mean(scale_weights * torch.norm(superq.scale(), p=1, dim=1))
+
             Lempty = 0.5 * torch.relu(-outside_values).mean()
             
             loss = Lsdf + Lreg + Lempty
@@ -163,4 +166,7 @@ def main():
         print("No valid objects evaluated.")
 
 if __name__ == "__main__":
+    torch.manual_seed(0)
+    np.random.seed(0)
+    random.seed(0)
     main()

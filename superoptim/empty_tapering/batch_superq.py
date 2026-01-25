@@ -112,7 +112,8 @@ class SuperQ(nn.Module):
         self.normals = torch.tensor(np.array(pc_o3d.normals), dtype=torch.float, device=device)
 
     def scale(self):
-        return torch.exp(self.raw_scale)
+        # Add epsilon to scales to prevent division by zero / huge gradients
+        return torch.exp(self.raw_scale) + 1e-6
 
     def exponents(self):
         minE, maxE = 0.1, 1.9
@@ -217,8 +218,12 @@ class SuperQ(nn.Module):
         
         fx = safe_mul(kx/sz, z) + 1
         fy = safe_mul(ky/sz, z) + 1
+        
+        # Avoid division by zero in tapering
+        fx = ((fx > 0).float() * 2 - 1) * torch.max(torch.abs(fx), torch.tensor(eps, device=fx.device))
+        fy = ((fy > 0).float() * 2 - 1) * torch.max(torch.abs(fy), torch.tensor(eps, device=fy.device))
         x = x / fx
-        y = y / fx
+        y = y / fy
         
         # Re-stack X is implicitly handled by component-wise operations below, 
         # but for radial distance we need to stack again or just compute norm
@@ -241,16 +246,34 @@ class SuperQ(nn.Module):
         return sdf
 
     def forward(self):
-        all_points = torch.cat([self.points, self.outside_points], dim=0) # (M, 3)
+        # 1. Process main points
+        sdfs_points = self.sdf_batch(self.points.T)
         
-        # Compute all SDFs in parallel
-        # Input to sdf_batch should be (3, M)
-        # Output is (N, M)
-        all_sdfs = self.sdf_batch(all_points.T)
+        # Calculate weights for weighted mean
+        logits_points = -100.0 * sdfs_points
+        weights_points = F.softmax(logits_points, dim=0)
         
-        weights = F.softmax(-100.0 * all_sdfs, dim=0)
-        all_sdfs = torch.clip(all_sdfs, -self.truncation, self.truncation)
-        sdf_values = torch.sum(weights * all_sdfs, dim=0)
+        # Leaky clipping
+        sdfs_points_clipped = torch.clip(sdfs_points, -self.truncation, self.truncation)
+        sdfs_points_leaky = sdfs_points_clipped + 0.1 * (sdfs_points - sdfs_points_clipped)
         
-        split_idx = self.points.shape[0]
-        return sdf_values[:split_idx], sdf_values[split_idx:]
+        values_points = torch.sum(weights_points * sdfs_points_leaky, dim=0)
+        
+        # Calculate counts based on minimum SDF (hard assignment)
+        idx_points = torch.argmin(sdfs_points, dim=0)
+        counts_points = torch.bincount(idx_points, minlength=self.N).float()
+
+        # 2. Process outside points
+        if self.outside_points.shape[0] > 0:
+            sdfs_outside = self.sdf_batch(self.outside_points.T)
+            sdfs_outside, idx_outside = torch.min(sdfs_outside, dim=0)
+            valid_mask = sdfs_outside < 0
+            counts_outside = torch.bincount(idx_outside[valid_mask], minlength=self.N).float()
+
+            sdfs_outside_clipped = torch.clip(sdfs_outside, -self.truncation, self.truncation)
+            values_outside = sdfs_outside_clipped + 0.1 * (sdfs_outside - sdfs_outside_clipped)
+        else:
+            values_outside = torch.empty(0, device=self.device)
+            counts_outside = torch.zeros(self.N, device=self.device)
+
+        return values_points, values_outside, counts_points, counts_outside
