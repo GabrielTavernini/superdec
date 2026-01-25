@@ -246,34 +246,27 @@ class SuperQ(nn.Module):
         return sdf
 
     def forward(self):
-        # 1. Process main points
-        sdfs_points = self.sdf_batch(self.points.T)
+        split_idx = self.points.shape[0]
+        all_points = torch.cat([self.points, self.outside_points], dim=0)
+        all_sdfs = self.sdf_batch(all_points.T)
+        # Leaky clipping
+        all_sdfs_clipped = torch.clip(all_sdfs, -self.truncation, self.truncation)
+        all_sdfs_leaky = all_sdfs_clipped + 0.1 * (all_sdfs - all_sdfs_clipped)
+
+        ## Surface values
+        sdfs_points = all_sdfs[:, :split_idx]
         
         # Calculate weights for weighted mean
         logits_points = -100.0 * sdfs_points
         weights_points = F.softmax(logits_points, dim=0)
-        
-        # Leaky clipping
-        sdfs_points_clipped = torch.clip(sdfs_points, -self.truncation, self.truncation)
-        sdfs_points_leaky = sdfs_points_clipped + 0.1 * (sdfs_points - sdfs_points_clipped)
-        
-        values_points = torch.sum(weights_points * sdfs_points_leaky, dim=0)
-        
+        values_points = torch.sum(weights_points * all_sdfs_leaky[:, :split_idx], dim=0)
+
         # Calculate counts based on minimum SDF (hard assignment)
         idx_points = torch.argmin(sdfs_points, dim=0)
         counts_points = torch.bincount(idx_points, minlength=self.N).float()
 
-        # 2. Process outside points
-        if self.outside_points.shape[0] > 0:
-            sdfs_outside = self.sdf_batch(self.outside_points.T)
-            sdfs_outside, idx_outside = torch.min(sdfs_outside, dim=0)
-            valid_mask = sdfs_outside < 0
-            counts_outside = torch.bincount(idx_outside[valid_mask], minlength=self.N).float()
-
-            sdfs_outside_clipped = torch.clip(sdfs_outside, -self.truncation, self.truncation)
-            values_outside = sdfs_outside_clipped + 0.1 * (sdfs_outside - sdfs_outside_clipped)
-        else:
-            values_outside = torch.empty(0, device=self.device)
-            counts_outside = torch.zeros(self.N, device=self.device)
-
+        ## Outside values
+        values_outside, idx_outside = torch.min(all_sdfs_leaky[:, split_idx:], dim=0)
+        valid_mask = values_outside < 0
+        counts_outside = torch.bincount(idx_outside[valid_mask], minlength=self.N).float()
         return values_points, values_outside, counts_points, counts_outside
