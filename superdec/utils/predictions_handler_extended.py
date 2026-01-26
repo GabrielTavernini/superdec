@@ -21,6 +21,7 @@ class PredictionHandler:
 
         # extension
         self.tapering = np.zeros_like(self.exponents)
+        self.bending = np.zeros_like(self.exponents)
     
     def save_npz(self, filepath):
         """Save accumulated outputs to compressed npz file."""
@@ -35,6 +36,7 @@ class PredictionHandler:
             exponents=np.stack(self.exponents),
             exist=np.stack(self.exist),
             tapering=np.stack(self.tapering),
+            bending=np.stack(self.bending),
         )
     
     @classmethod
@@ -53,7 +55,8 @@ class PredictionHandler:
             'translation': outdict['trans'].cpu().numpy(), 
             'exponents': outdict['shape'].cpu().numpy(), 
             'exist': outdict['exist'].cpu().numpy(),
-            'tapering': outdict['tapering'].cpu().numpy()
+            'tapering': outdict['tapering'].cpu().numpy(),
+            'bending': outdict['bending'].cpu().numpy()
         }
         return cls(predictions)
 
@@ -67,6 +70,7 @@ class PredictionHandler:
         self.exponents = np.concatenate((self.exponents, outdict['shape'].cpu().numpy()), axis=0)
         self.exist = np.concatenate((self.exist, outdict['exist'].cpu().numpy()), axis=0)
         self.tapering = np.concatenate((self.tapering, outdict['tapering'].cpu().numpy()), axis=0)
+        self.bending = np.concatenate((self.bending, outdict['bending'].cpu().numpy()), axis=0)
 
     def get_segmented_pc(self, index):
         if isinstance(self.assign_matrix, torch.Tensor):
@@ -116,7 +120,7 @@ class PredictionHandler:
             if self.exist[index, p] > 0.5:
                 mesh = self._superquadric_mesh(
                     self.scale[index, p], self.exponents[index, p],
-                    self.rotation[index, p], self.translation[index, p], self.tapering[index, p], resolution
+                    self.rotation[index, p], self.translation[index, p], self.tapering[index, p], self.bending[index, p], resolution
                 )
                 
                 vertices_cur, faces_cur = mesh
@@ -141,7 +145,7 @@ class PredictionHandler:
                 
         return mesh
 
-    def _superquadric_mesh(self, scale, exponents, rotation, translation, tapering, N):
+    def _superquadric_mesh(self, scale, exponents, rotation, translation, tapering, bending, N):
         def f(o, m):
                 return np.sign(np.sin(o)) * np.abs(np.sin(o))**m
         def g(o, m):
@@ -164,9 +168,20 @@ class PredictionHandler:
         x = x*fx
         y = y*fx
 
-        # Set poles to zero to account for numerical instabilities in f and g due to ** operator
-        x[:N] = 0.0
-        x[-N:] = 0.0
+        # Apply bending transformation
+        kb, alpha = bending
+        if(kb > 1e-3):
+            beta = np.arctan2(y, x)
+            r = np.sqrt(x**2 + y**2) * np.cos(alpha - beta)
+            gamma = z * kb
+            rho = (1.0 / kb) - r        
+            R = (1.0 / kb) - rho * np.cos(gamma)
+
+            # 3. Rotate back
+            x = x + (R - r)*np.cos(alpha)
+            y = y + (R - r)*np.sin(alpha)
+            z = rho * np.sin(gamma)
+
         vertices =  np.concatenate([np.expand_dims(x, 1),
                                     np.expand_dims(y, 1),
                                     np.expand_dims(z, 1)], axis=1)
