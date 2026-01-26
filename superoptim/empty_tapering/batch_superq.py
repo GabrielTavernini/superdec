@@ -23,6 +23,7 @@ class SuperQ(nn.Module):
         device: str = "cuda",
         silent: bool = False,
     ):
+        self.minE, self.maxE = 0.1, 1.9
         # Anything self.x = nn.Parameter(...) is trainable
         trainable = ["raw_scale", "raw_exponents", "raw_rotation", "raw_tapering", "translation"]
 
@@ -34,7 +35,7 @@ class SuperQ(nn.Module):
         raw_scale = torch.tensor(pred_handler.scale[self.idx].reshape(-1, 3)[self.mask], dtype=torch.float, device=device)
         self.raw_scale = torch.log(raw_scale)
         raw_exponents = torch.tensor(pred_handler.exponents[self.idx].reshape(-1, 2)[self.mask], dtype=torch.float, device=device)
-        self.raw_exponents = torch.logit(raw_exponents)
+        self.raw_exponents = torch.logit((raw_exponents - self.minE) / (self.maxE - self.minE))
         rot_mat = torch.tensor(pred_handler.rotation[self.idx].reshape(-1, 3, 3)[self.mask], dtype=torch.float, device=device)
         self.raw_rotation = mat2quat(rot_mat) # Shape (N, 3)
         self.translation = torch.tensor(pred_handler.translation[self.idx].reshape(-1, 3)[self.mask], dtype=torch.float, device=device)
@@ -116,8 +117,7 @@ class SuperQ(nn.Module):
         return torch.exp(self.raw_scale) + 1e-6
 
     def exponents(self):
-        minE, maxE = 0.1, 1.9
-        return (torch.sigmoid(self.raw_exponents) * (maxE - minE)) + minE
+        return (torch.sigmoid(self.raw_exponents) * (self.maxE - self.minE)) + self.minE
 
     def rotation(self):
         return quat2mat(self.raw_rotation)

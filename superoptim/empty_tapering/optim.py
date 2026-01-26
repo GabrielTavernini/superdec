@@ -1,4 +1,5 @@
 import os
+import sys
 import torch
 import numpy as np
 from omegaconf import OmegaConf
@@ -56,10 +57,14 @@ def visualize_handler(server, superq, sdf_values, outside_values, plot = False):
         )
 
 def main():
-    truncation = 0.05
-    # pred_handler = PredictionHandler.from_npz("data/output_npz/sq.npz")
-    pred_handler = PredictionHandler.from_npz("data/output_npz/objects/round_table6.npz")
+    if len(sys.argv) > 1:
+        object_name = sys.argv[1]
+    else:
+        object_name = "round_table"
+    pred_handler = PredictionHandler.from_npz(f"data/output_npz/objects/{object_name}.npz")
     print(f"Optimizing {pred_handler.names[0]}")
+    
+    truncation = 0.05
     superq = SuperQ(
         pred_handler=pred_handler,
         truncation=truncation,
