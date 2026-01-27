@@ -161,6 +161,9 @@ class PredictionHandler:
         x = scale[0] * g(v, exponents[0]) * g(u, exponents[1])
         y = scale[1] * g(v, exponents[0]) * f(u, exponents[1])
         z = scale[2] * f(v, exponents[0])
+        # Set poles to zero to account for numerical instabilities in f and g due to ** operator
+        x[:N] = 0.0
+        x[-N:] = 0.0
 
         kx, ky = tapering
         fx = kx/scale[2] * z + 1

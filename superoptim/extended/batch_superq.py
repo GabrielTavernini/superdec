@@ -145,7 +145,7 @@ class SuperQ(nn.Module):
             "raw_scale": 5e-2,
             "raw_exponents": 1e-2,
             "raw_tapering": 5e-4,
-            "raw_bending": 5e-3,
+            "raw_bending": 1e-2,
         }
         groups = []
         for name, param in self.named_parameters():
@@ -206,7 +206,7 @@ class SuperQ(nn.Module):
         x_bent = x - (R - r) * torch.cos(alpha)  # (N, M)
         y_bent = y - (R - r) * torch.sin(alpha)  # (N, M)
         z_bent = (1.0 / kb) * gamma  # (N, M)
-                
+        
         return x_bent, y_bent, z_bent
 
     def sdf_batch(self, points):
