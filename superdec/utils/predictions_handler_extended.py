@@ -20,8 +20,15 @@ class PredictionHandler:
         self.colors = generate_ncolors(self.translation.shape[1])  # Generate colors for each object
 
         # extension
-        self.tapering = np.zeros_like(self.exponents)
-        self.bending = np.zeros_like(self.exponents)
+        if 'tapering' in predictions:
+            self.tapering = predictions['tapering']
+        else:
+            self.tapering = np.zeros_like(self.exponents)
+            
+        if 'bending' in predictions:
+            self.bending = predictions['bending']
+        else:
+            self.bending = np.zeros_like(self.exponents)
     
     def save_npz(self, filepath):
         """Save accumulated outputs to compressed npz file."""

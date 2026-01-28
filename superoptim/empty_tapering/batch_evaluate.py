@@ -3,8 +3,8 @@ import torch
 import numpy as np
 from tqdm import tqdm
 from superdec.utils.predictions_handler_extended import PredictionHandler
-from superdec.utils.evaluation import get_outdict
-from .batch_superq import SuperQ, BatchSuperQMulti
+from superdec.utils.evaluation import get_outdict, eval_mesh
+from .batch_superq import BatchSuperQMulti
 import viser
 import random
 
@@ -30,8 +30,7 @@ def main():
         if os.path.exists(os.path.join(category_path, name)):
             valid_indices.append(i)
 
-    # valid_indices = valid_indices[:20] # Limit to 20 objects for testing
-    
+    # valid_indices = valid_indices[:32] # Limit to 32 objects for testing
     print(f"Loaded {len(valid_indices)} objects from category 04379243 out of {pred_handler.scale.shape[0]}.")
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -45,7 +44,9 @@ def main():
         'num_primitives': 0.0,
         'count': 0
     }
-
+    
+    # Store per-object metrics for ranking
+    object_metrics = [] # List of tuples: (index, name, chamfer_l1)
     batch_size = 32
     
     for i in tqdm(range(0, len(valid_indices), batch_size), desc="Processing batches"):
@@ -83,6 +84,9 @@ def main():
         
         weight_pos = 2.0
         weight_neg = 1.0
+
+        best_losses = [float('inf')] * len(batch_indices)
+        best_params = [None] * len(batch_indices)        
         
         # Optimization Loop
         for epoch in range(num_epochs):
@@ -123,11 +127,38 @@ def main():
             loss = Lsdf + Lreg + Lempty
             
             if torch.isnan(loss):
+                print(f"nan loss at epoch {epoch}")
                 break
             
             loss.backward()
             optimizer.step()
+
+            # Save best parameters (based on Lsdf per object)
+            with torch.no_grad():
+                for b in range(len(batch_indices)):
+                    mask_p = superq.points_valid_mask[b]
+                    if mask_p.any():
+                        current_lsdf = Lsdf_b[b][mask_p].mean().item()
+                        if current_lsdf < best_losses[b]:
+                            best_losses[b] = current_lsdf
+                            best_params[b] = {
+                                "raw_scale": superq.raw_scale[b].clone(),
+                                "raw_exponents": superq.raw_exponents[b].clone(),
+                                "raw_rotation": superq.raw_rotation[b].clone(),
+                                "raw_tapering": superq.raw_tapering[b].clone(),
+                                "translation": superq.translation[b].clone()
+                            }
         
+        # Restore best parameters
+        with torch.no_grad():
+             for b in range(len(batch_indices)):
+                  if best_params[b] is not None:
+                       superq.raw_scale[b].copy_(best_params[b]["raw_scale"])
+                       superq.raw_exponents[b].copy_(best_params[b]["raw_exponents"])
+                       superq.raw_rotation[b].copy_(best_params[b]["raw_rotation"])
+                       superq.raw_tapering[b].copy_(best_params[b]["raw_tapering"])
+                       superq.translation[b].copy_(best_params[b]["translation"])
+
         # Restore Center
         with torch.no_grad():
             superq.translation.data += centers.unsqueeze(1)
@@ -136,33 +167,23 @@ def main():
         
         # Evaluate
         for idx in batch_indices:
-             try:
+            try:
                 mesh = pred_handler.get_mesh(idx, resolution=100, colors=False)
-             except Exception as e:
+            except Exception as e:
                 print(f"Error generating mesh for object {idx}: {e}")
-                continue
-
-             if mesh is None:
-                continue
-                
-             gt_pc = pred_handler.pc[idx] 
-             
-             try:
-                 num_points = gt_pc.shape[0]
-                 pc_pred, idx_face = mesh.sample(num_points, return_index=True)
-                 normals_pred = mesh.face_normals[idx_face]
-             except Exception as e:
-                 continue
-                 
-             gt_normal = None
+            continue
             
-             out_dict_cur = get_outdict(gt_pc, gt_normal, pc_pred, normals_pred)
-             num_prim = (pred_handler.exist[idx] > 0.5).sum()
+            num_prim = (pred_handler.exist[idx] > 0.5).sum()
+            aggregated_metrics['chamfer-L1'] += out_dict_cur['chamfer-L1']
+            aggregated_metrics['chamfer-L2'] += out_dict_cur['chamfer-L2']
+            aggregated_metrics['num_primitives'] += num_prim
+            aggregated_metrics['count'] += 1
             
-             aggregated_metrics['chamfer-L1'] += out_dict_cur['chamfer-L1']
-             aggregated_metrics['chamfer-L2'] += out_dict_cur['chamfer-L2']
-             aggregated_metrics['num_primitives'] += num_prim
-             aggregated_metrics['count'] += 1
+            object_metrics.append({
+                'index': idx,
+                'name': pred_handler.names[idx],
+                'chamfer-L1': out_dict_cur['chamfer-L1']
+            })
 
     # Save results
     print(f"Saving optimized results to {output_npz}...")
@@ -179,6 +200,13 @@ def main():
         print(f"{'mean_chamfer_l1':>25}: {mean_chamfer_l1:.6f}")
         print(f"{'mean_chamfer_l2':>25}: {mean_chamfer_l2:.6f}")
         print(f"{'avg_num_primitives':>25}: {mean_num_primitives:.6f}")
+        
+        # Sort by Chamfer-L1 descending (worst first)
+        object_metrics.sort(key=lambda x: x['chamfer-L1'], reverse=True)
+        print("\n----- Top 10 Worst Objects (by Chamfer-L1) -----")
+        print(f"{'Index':<10} {'Name':<40} {'Chamfer-L1':<15}")
+        for item in object_metrics[:10]:
+            print(f"{item['index']:<10} {item['name']:<40} {item['chamfer-L1']:.6f}")
     else:
         print("No valid objects evaluated.")
 

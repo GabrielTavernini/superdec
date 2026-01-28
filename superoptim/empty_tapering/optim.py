@@ -16,7 +16,7 @@ from superdec.utils.visualizations import generate_ncolors
 from tqdm import tqdm
 import matplotlib.pyplot as plt
 
-from .batch_superq import SuperQ
+from .superq import SuperQ
 from ..utils import plot_pred_handler
 
 def visualize_handler(server, superq, sdf_values, outside_values, plot = False):
