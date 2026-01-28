@@ -74,6 +74,9 @@ class SuperQ(nn.Module):
         self.line_length = 0.01
         tmp_points, tmp_normals = self.points, self.normals
         decay_rate = 0.5
+        # Use a generator seeded with idx for deterministic sampling
+        g = torch.Generator()
+        g.manual_seed(int(idx))
         for i in range(3):
             tmp_points = tmp_points + (tmp_normals * self.line_length)
             distances = torch.cdist(tmp_points, og_points)
@@ -84,7 +87,7 @@ class SuperQ(nn.Module):
             if valid_indices.numel() > 0:
                 num_valid = valid_indices.numel()
                 num_to_sample = max(1, int(num_valid * (decay_rate if i > 0 else 1)))
-                selected_indices = valid_indices[torch.randperm(num_valid)[:num_to_sample]]
+                selected_indices = valid_indices[torch.randperm(num_valid, generator=g)[:num_to_sample]]
                 tmp_points, tmp_normals = tmp_points[selected_indices], tmp_normals[selected_indices]
                 outside_points.append(tmp_points)
         if len(outside_points) > 0:

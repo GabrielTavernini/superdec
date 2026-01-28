@@ -97,6 +97,9 @@ class BatchSuperQMulti(nn.Module):
             tmp_pts, tmp_nrms = pts, nrms
             og_pts = pts
             
+            # Use a generator seeded with idx for deterministic sampling
+            g = torch.Generator()
+            g.manual_seed(int(idx))
             for step in range(3):
                 tmp_pts = tmp_pts + (tmp_nrms * line_length)
                 dists = torch.cdist(tmp_pts, og_pts)
@@ -107,7 +110,7 @@ class BatchSuperQMulti(nn.Module):
                 if valid_idx.numel() > 0:
                     num_valid = valid_idx.numel()
                     num_to_sample = max(1, int(num_valid * (decay_rate if step > 0 else 1)))
-                    sel = valid_idx[torch.randperm(num_valid)[:num_to_sample]]
+                    sel = valid_idx[torch.randperm(num_valid, generator=g)[:num_to_sample]]
                     tmp_pts, tmp_nrms = tmp_pts[sel], tmp_nrms[sel]
                     out_pts_list_local.append(tmp_pts)
             
@@ -232,6 +235,9 @@ class BatchSuperQMulti(nn.Module):
         leaky_points = all_sdfs_leaky[:, :, :split_idx]
         
         logits = -100.0 * sdfs_points
+        # Ensure invalid primitives have 0 weight in softmax
+        mask_expanded_points = self.exist_mask.unsqueeze(-1).expand_as(logits)
+        logits = torch.where(mask_expanded_points, logits, torch.tensor(-float('inf'), device=logits.device))
         weights = F.softmax(logits, dim=1) 
         values_points = torch.sum(weights * leaky_points, dim=1) 
         

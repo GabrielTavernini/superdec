@@ -3,7 +3,7 @@ import torch
 import numpy as np
 from tqdm import tqdm
 from superdec.utils.predictions_handler_extended import PredictionHandler
-from superdec.utils.evaluation import get_outdict, eval_mesh
+from superdec.utils.evaluation import get_outdict
 from .batch_superq import BatchSuperQMulti
 import viser
 import random
@@ -101,10 +101,12 @@ def main():
             mask_pts = superq.points_valid_mask
             Lsdf_b = (weight_pos * pos_part + weight_neg * torch.abs(neg_part)) / (weight_pos + weight_neg)
             
-            if mask_pts.any():
-                Lsdf = Lsdf_b[mask_pts].mean()
-            else:
-                Lsdf = torch.tensor(0.0, device=device)
+            # Compute sum of per-object means for Lsdf
+            Lsdf_list = [
+                (Lsdf_b[b][m].mean()) if m.any()
+                else torch.tensor(0.0, device=device) for b, m in zip(range(len(batch_indices)), mask_pts)
+            ]
+            Lsdf = torch.stack(Lsdf_list).sum()
             
             outside_ratio = counts_outside / (counts_points + counts_outside + 1e-6)
             scale_weights = 1 + 10.0 * outside_ratio 
@@ -112,17 +114,23 @@ def main():
             
             mask_exist = superq.exist_mask
             Lreg_b = scale_weights * norms
-            if mask_exist.any():
-                Lreg = 0.005 * Lreg_b[mask_exist].mean()
-            else:
-                Lreg = torch.tensor(0.0, device=device)
+            
+            # Compute sum of per-object means for Lreg
+            Lreg_list = [
+                (0.005 * Lreg_b[b][m].mean()) if m.any()
+                else torch.tensor(0.0, device=device) for b, m in zip(range(len(batch_indices)), mask_exist)
+            ]
+            Lreg = torch.stack(Lreg_list).sum()
 
             mask_out = superq.outside_valid_mask
-            if mask_out.any():
-                Lempty_val = torch.relu(-outside_values)
-                Lempty = 0.5 * Lempty_val[mask_out].mean()
-            else:
-                Lempty = torch.tensor(0.0, device=device)
+            Lempty_val = torch.relu(-outside_values)
+            
+            # Compute sum of per-object means for Lempty
+            Lempty_list = [
+                (0.5 * Lempty_val[b][m].mean()) if m.any()
+                else torch.tensor(0.0, device=device) for b, m in zip(range(len(batch_indices)), mask_out)
+            ]
+            Lempty = torch.stack(Lempty_list).sum()
             
             loss = Lsdf + Lreg + Lempty
             
@@ -166,12 +174,29 @@ def main():
         superq.update_handler(compute_meshes=False)
         
         # Evaluate
-        for idx in batch_indices:
+        for b_idx in range(len(batch_indices)):
+            idx = batch_indices[b_idx]
             try:
                 mesh = pred_handler.get_mesh(idx, resolution=100, colors=False)
             except Exception as e:
                 print(f"Error generating mesh for object {idx}: {e}")
-            continue
+                continue
+
+            if mesh is None:
+                continue
+
+            gt_pc = pred_handler.pc[idx] 
+            gt_normal = None
+            
+            try:
+                # Use get_outdict instead of eval_mesh to avoid IoU calc
+                num_points = gt_pc.shape[0]
+                pc_pred, idx_face = mesh.sample(num_points, return_index=True)
+                normals_pred = mesh.face_normals[idx_face]
+                out_dict_cur = get_outdict(gt_pc, gt_normal, pc_pred, normals_pred)
+            except Exception as e:
+                print(f"Eval mesh failed: {e}")
+                continue
             
             num_prim = (pred_handler.exist[idx] > 0.5).sum()
             aggregated_metrics['chamfer-L1'] += out_dict_cur['chamfer-L1']

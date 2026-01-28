@@ -2,7 +2,7 @@ import numpy as np
 import os
 import viser
 import time
-from superdec.utils.predictions_handler import PredictionHandler 
+from superdec.utils.predictions_handler_extended import PredictionHandler 
 from superdec.utils.visualizations import generate_ncolors
 import torch
 import trimesh
