@@ -10,7 +10,7 @@ import random
 
 def main():
     input_npz = "data/output_npz/shapenet_test.npz"
-    output_npz = "data/output_npz/shapenet_test_tables_optimized.npz"
+    output_npz = "data/output_npz/shapenet_test_tables_optimized_0neg_loss.npz"
 
     # server = viser.ViserServer()
     # server.scene.set_up_direction([0.0, 1.0, 0.0])
@@ -30,7 +30,7 @@ def main():
         if os.path.exists(os.path.join(category_path, name)):
             valid_indices.append(i)
 
-    # valid_indices = valid_indices[:32] # Limit to 32 objects for testing
+    valid_indices = valid_indices[:32] # Limit to 32 objects for testing
     print(f"Loaded {len(valid_indices)} objects from category 04379243 out of {pred_handler.scale.shape[0]}.")
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -71,20 +71,12 @@ def main():
         centers = []
         with torch.no_grad():
              for b in range(len(batch_indices)):
-                  mask = superq.points_valid_mask[b]
-                  if mask.any():
-                      c = superq.points[b][mask].mean(dim=0)
-                  else:
-                      c = torch.zeros(3, device=device)
+                  c = superq.points[b].mean(dim=0)
                   superq.points[b] -= c
-                  if superq.outside_valid_mask[b].any():
-                      superq.outside_points[b][superq.outside_valid_mask[b]] -= c
+                  superq.outside_points[b] -= c
                   superq.translation.data[b] -= c
                   centers.append(c)
         centers = torch.stack(centers)
-        
-        weight_pos = 2.0
-        weight_neg = 1.0
 
         best_losses = [float('inf')] * len(batch_indices)
         best_params = [None] * len(batch_indices)        
@@ -93,60 +85,24 @@ def main():
         for epoch in range(num_epochs):
             optimizer.zero_grad()
             
-            # forward: (B, Mp), (B, Mo), (B, N), (B, N)
-            sdf_values, outside_values, counts_points, counts_outside = superq.forward()
+            # forward: returns a dict output
+            forward_out = superq.forward()
 
-            pos_part = torch.clamp(sdf_values, min=0)
-            neg_part = torch.clamp(sdf_values, max=0)
-            
-            mask_pts = superq.points_valid_mask
-            Lsdf_b = (weight_pos * pos_part + weight_neg * torch.abs(neg_part)) / (weight_pos + weight_neg)
-            
-            # Compute sum of per-object means for Lsdf
-            Lsdf_list = [
-                (Lsdf_b[b][m].mean()) if m.any()
-                else torch.tensor(0.0, device=device) for b, m in zip(range(len(batch_indices)), mask_pts)
-            ]
-            Lsdf = torch.stack(Lsdf_list).sum()
-            
-            outside_ratio = counts_outside / (counts_points + counts_outside + 1e-6)
-            scale_weights = 1 + 10.0 * outside_ratio 
-            norms = torch.norm(superq.scale(), p=1, dim=2) 
-            
-            mask_exist = superq.exist_mask
-            Lreg_b = scale_weights * norms
-            
-            # Compute sum of per-object means for Lreg
-            Lreg_list = [
-                (0.005 * Lreg_b[b][m].mean()) if m.any()
-                else torch.tensor(0.0, device=device) for b, m in zip(range(len(batch_indices)), mask_exist)
-            ]
-            Lreg = torch.stack(Lreg_list).sum()
+            # Compute per-batch losses using shared function
+            loss, _ = superq.compute_losses(forward_out)
+            batch_loss = loss.sum()
 
-            mask_out = superq.outside_valid_mask
-            Lempty_val = torch.relu(-outside_values)
-            
-            # Compute sum of per-object means for Lempty
-            Lempty_list = [
-                (0.5 * Lempty_val[b][m].mean()) if m.any()
-                else torch.tensor(0.0, device=device) for b, m in zip(range(len(batch_indices)), mask_out)
-            ]
-            Lempty = torch.stack(Lempty_list).sum()
-            
-            loss = Lsdf + Lreg + Lempty
-            
-            if torch.isnan(loss):
+            if torch.isnan(batch_loss):
                 print(f"nan loss at epoch {epoch}")
                 break
             
-            loss.backward()
+            batch_loss.backward()
             optimizer.step()
 
             # Save best parameters (based on Total Loss per object)
             with torch.no_grad():
                 for b in range(len(batch_indices)):
-                    current_loss = Lsdf_list[b].item() + Lreg_list[b].item() + Lempty_list[b].item()
-
+                    current_loss = loss[b]
                     if current_loss < best_losses[b]:
                         best_losses[b] = current_loss
                         best_params[b] = {

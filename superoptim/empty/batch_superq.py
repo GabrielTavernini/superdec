@@ -33,19 +33,18 @@ class BatchSuperQMulti(nn.Module):
         B = len(indices)
         self.N_max = pred_handler.scale.shape[1]
         
-        self.points_list = []
-        self.normals_list = []
-        self.outside_points_list = []
-        
+        self.M_points = 4096
+        self.K_outside = 6144
+
         scale_list = []
         exp_list = []
         rot_list = []
         trans_list = []
         self.masks = [] 
 
-        max_M = 0
-        max_K = 0
-
+        self.points = torch.zeros(B, self.M_points, 3, device=device)
+        self.outside_points = torch.zeros(B, self.K_outside, 3, device=device)
+        
         for i, idx in enumerate(indices):
             # --- Params ---
             mask = (pred_handler.exist[idx] > 0.5)
@@ -65,31 +64,30 @@ class BatchSuperQMulti(nn.Module):
             
             # --- Points ---
             ply = ply_paths[i] if ply_paths else None
-            pts_default = torch.tensor(pred_handler.pc[idx], dtype=torch.float, device=device)
-            pts = pts_default
+            pts = torch.tensor(pred_handler.pc[idx], dtype=torch.float, device=device)
             nrms = None
-
-            if ply and ply.endswith("npz") and os.path.exists(ply):
-                try:
-                    data = np.load(ply)
-                    pts_ply = torch.tensor(np.array(data['points']), dtype=torch.float, device=device) 
-                    ply_normals = torch.tensor(np.array(data['normals']), dtype=torch.float, device=device) 
-                    distances = torch.cdist(pts_default, pts_ply)
-                    closest = torch.argmin(distances, dim=1)
-                    pts = pts_default
-                    nrms = ply_normals[closest]
-                except Exception as e:
-                    print(f"Error loading {ply}: {e}")
+            try:
+                data = np.load(ply)
+                pts_ply = torch.tensor(np.array(data['points']), dtype=torch.float, device=device) 
+                ply_normals = torch.tensor(np.array(data['normals']), dtype=torch.float, device=device) 
+                distances = torch.cdist(pts, pts_ply)
+                closest = torch.argmin(distances, dim=1)
+                nrms = ply_normals[closest]
+            except Exception as e:
+                print(f"Error loading {ply}: {e}")
             
+            # Ensure pts has correct shape if not loaded from ply
+            if pts.shape[0] != self.M_points:
+                print(f"Error points shape missmatch")
+                exit()
+
             if nrms is None:
                 pcd = o3d.geometry.PointCloud()
                 pcd.points = o3d.utility.Vector3dVector(pts.detach().cpu().numpy())
                 pcd.estimate_normals()
                 nrms = torch.tensor(np.array(pcd.normals), dtype=torch.float, device=device)
             
-            self.points_list.append(pts)
-            self.normals_list.append(nrms)
-            max_M = max(max_M, pts.shape[0])
+            self.points[i] = pts
 
             # --- Outside Points ---
             out_pts_list_local = []
@@ -105,8 +103,8 @@ class BatchSuperQMulti(nn.Module):
                 tmp_pts = tmp_pts + (tmp_nrms * line_length)
                 dists = torch.cdist(tmp_pts, og_pts)
                 dists = torch.min(dists, dim=1).values
-                m = (dists >= (line_length * (step+1)) - 1e-4)
-                valid_idx = torch.nonzero(m).squeeze()
+                m = (dists >= (line_length * (step+1)) - 1e-4) # points that successfully moved away
+                valid_idx = torch.nonzero(m).squeeze(1)
                 
                 if valid_idx.numel() > 0:
                     num_valid = valid_idx.numel()
@@ -114,14 +112,27 @@ class BatchSuperQMulti(nn.Module):
                     sel = valid_idx[torch.randperm(num_valid, generator=g)[:num_to_sample]]
                     tmp_pts, tmp_nrms = tmp_pts[sel], tmp_nrms[sel]
                     out_pts_list_local.append(tmp_pts)
+                else:
+                    # No points survived distance check
+                    break
             
             if out_pts_list_local:
                 out_pts = torch.cat(out_pts_list_local, dim=0)
             else:
                 out_pts = torch.empty((0, 3), device=device)
-            
-            self.outside_points_list.append(out_pts)
-            max_K = max(max_K, out_pts.shape[0])
+
+            # --- Fix size to K_outside ---
+            curr_k = out_pts.shape[0]
+            if curr_k == self.K_outside:
+                self.outside_points[i] = out_pts
+            elif curr_k > self.K_outside:
+                perm = torch.randperm(curr_k, generator=g)[:self.K_outside].to(device)
+                self.outside_points[i] = out_pts[perm]
+            else:
+                reps = (self.K_outside // curr_k) + 1
+                out_pts = out_pts.repeat(reps, 1)
+                self.outside_points[i] = out_pts[:self.K_outside]
+                    
 
         self.raw_scale = nn.Parameter(torch.stack(scale_list)) # (B, N, 3)
         self.raw_exponents = nn.Parameter(torch.stack(exp_list)) # (B, N, 2)
@@ -130,21 +141,6 @@ class BatchSuperQMulti(nn.Module):
         self.raw_tapering = nn.Parameter(torch.full((B, self.N_max, 2), 1e-4, dtype=torch.float, device=device))
         
         self.exist_mask = torch.stack(self.masks) # (B, N)
-        
-        self.points = torch.zeros(B, max_M, 3, device=device)
-        self.outside_points = torch.zeros(B, max_K, 3, device=device)
-        self.points_valid_mask = torch.zeros(B, max_M, dtype=torch.bool, device=device)
-        self.outside_valid_mask = torch.zeros(B, max_K, dtype=torch.bool, device=device)
-
-        for i in range(B):
-            n = self.points_list[i].shape[0]
-            self.points[i, :n] = self.points_list[i]
-            self.points_valid_mask[i, :n] = True
-            
-            n = self.outside_points_list[i].shape[0]
-            if n > 0:
-                self.outside_points[i, :n] = self.outside_points_list[i]
-                self.outside_valid_mask[i, :n] = True
 
     def scale(self):
         return torch.exp(self.raw_scale) + self.minS
@@ -218,6 +214,45 @@ class BatchSuperQMulti(nn.Module):
         
         sdf = safe_mul(r0, (1 - f_func))
         return sdf
+
+    def compute_losses(self, forward_out, weight_pos: float = 2.0, weight_neg: float = 1.0):
+        sdf_values = forward_out.get('sdf_values')
+        outside_values = forward_out.get('outside_values')
+        counts_points = forward_out.get('counts_points')
+        counts_outside = forward_out.get('counts_outside')
+        
+        device = sdf_values.device
+        B = sdf_values.shape[0]
+
+        # SDF loss per point
+        pos_part = torch.clamp(sdf_values, min=0.0)
+        neg_part = torch.clamp(sdf_values, max=0.0)
+        denom = (weight_pos + weight_neg)
+        Lsdf_b = (weight_pos * pos_part + weight_neg * torch.abs(neg_part)) / denom
+        
+        # Simplified: Lsdf_b (B, M) -> mean over fixed M points
+        Lsdf = Lsdf_b.mean(dim=1)
+
+        # Regularization term per primitive
+        outside_ratio = counts_outside / (counts_points + counts_outside + 1e-6)
+        scale_weights = 1.0 + 10.0 * outside_ratio
+        norms = torch.norm(self.scale(), p=1, dim=2) # (B, N)
+        
+        mask_exist = self.exist_mask
+        Lreg_b = scale_weights * norms
+        Lreg_list = [
+            (0.005 * Lreg_b[b][mask_exist[b]].mean()) if mask_exist[b].any()
+            else torch.tensor(0.0, device=device) for b in range(B)
+        ]
+        Lreg = torch.stack(Lreg_list)
+
+        # Empty/outside term
+        Lempty_val = torch.relu(-outside_values)
+        # Simplified: mean over fixed K points
+        Lempty = 0.5 * Lempty_val.mean(dim=1)
+        
+        loss = Lsdf + Lreg + Lempty
+        return loss, {"Lsdf": Lsdf, "Lreg": Lreg, "Lempty": Lempty}
         
     def forward(self):
         split_idx = self.points.shape[1]
@@ -242,27 +277,29 @@ class BatchSuperQMulti(nn.Module):
         weights = F.softmax(logits, dim=1) 
         values_points = torch.sum(weights * leaky_points, dim=1) 
         
+        # Simplified counting
         idx_points = torch.argmin(sdfs_points, dim=1) 
         counts_points = torch.zeros(all_sdfs.shape[0], all_sdfs.shape[1], device=all_sdfs.device)
         for b in range(all_sdfs.shape[0]):
-            valid_p = self.points_valid_mask[b]
-            if valid_p.any():
-                counts_points[b] = torch.bincount(idx_points[b][valid_p], minlength=self.N_max).float()
+            counts_points[b] = torch.bincount(idx_points[b], minlength=self.N_max).float()
         
         sdfs_outside_leaky = all_sdfs_leaky[:, :, split_idx:]
         values_outside, idx_outside = torch.min(sdfs_outside_leaky, dim=1) 
         
         counts_outside = torch.zeros_like(counts_points)
         for b in range(all_sdfs.shape[0]):
-            valid_o = self.outside_valid_mask[b]
-            if valid_o.any():
-                 v_out = values_outside[b][valid_o]
-                 idx_out = idx_outside[b][valid_o]
-                 neg_mask = v_out < 0
-                 if neg_mask.any():
-                     counts_outside[b] = torch.bincount(idx_out[neg_mask], minlength=self.N_max).float()
+            v_out = values_outside[b]
+            idx_out = idx_outside[b]
+            neg_mask = v_out < 0
+            if neg_mask.any():
+                counts_outside[b] = torch.bincount(idx_out[neg_mask], minlength=self.N_max).float()
                      
-        return values_points, values_outside, counts_points, counts_outside
+        return {
+            'sdf_values': values_points,
+            'outside_values': values_outside,
+            'counts_points': counts_points,
+            'counts_outside': counts_outside,
+        }
 
     def update_handler(self, compute_meshes=True):
          for i, idx in enumerate(self.indices):
