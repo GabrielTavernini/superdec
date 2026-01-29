@@ -3,7 +3,7 @@ import torch
 import numpy as np
 from tqdm import tqdm
 from superdec.utils.predictions_handler_extended import PredictionHandler
-from superdec.utils.evaluation import get_outdict
+from ..evaluation import get_outdict, eval_mesh
 from .batch_superq import BatchSuperQMulti
 import viser
 import random
@@ -41,6 +41,7 @@ def main():
     aggregated_metrics = {
         'chamfer-L1': 0.0,
         'chamfer-L2': 0.0,
+        'iou': 0.0,
         'num_primitives': 0.0,
         'count': 0
     }
@@ -53,7 +54,7 @@ def main():
         batch_indices = valid_indices[i : i + batch_size]
         # print(f"Processing batch {i//batch_size + 1}, indices: {batch_indices}")
         
-        ply_paths = [f"data/ShapeNet/04379243/{pred_handler.names[idx]}/pointcloud.npz" for idx in batch_indices]
+        ply_paths = [f"{category_path}/{pred_handler.names[idx]}/pointcloud.npz" for idx in batch_indices]
         
         superq = BatchSuperQMulti(
             pred_handler=pred_handler,
@@ -141,21 +142,20 @@ def main():
             loss.backward()
             optimizer.step()
 
-            # Save best parameters (based on Lsdf per object)
+            # Save best parameters (based on Total Loss per object)
             with torch.no_grad():
                 for b in range(len(batch_indices)):
-                    mask_p = superq.points_valid_mask[b]
-                    if mask_p.any():
-                        current_lsdf = Lsdf_b[b][mask_p].mean().item()
-                        if current_lsdf < best_losses[b]:
-                            best_losses[b] = current_lsdf
-                            best_params[b] = {
-                                "raw_scale": superq.raw_scale[b].clone(),
-                                "raw_exponents": superq.raw_exponents[b].clone(),
-                                "raw_rotation": superq.raw_rotation[b].clone(),
-                                "raw_tapering": superq.raw_tapering[b].clone(),
-                                "translation": superq.translation[b].clone()
-                            }
+                    current_loss = Lsdf_list[b].item() + Lreg_list[b].item() + Lempty_list[b].item()
+
+                    if current_loss < best_losses[b]:
+                        best_losses[b] = current_loss
+                        best_params[b] = {
+                            "raw_scale": superq.raw_scale[b].clone(),
+                            "raw_exponents": superq.raw_exponents[b].clone(),
+                            "raw_rotation": superq.raw_rotation[b].clone(),
+                            "raw_tapering": superq.raw_tapering[b].clone(),
+                            "translation": superq.translation[b].clone()
+                        }
         
         # Restore best parameters
         with torch.no_grad():
@@ -188,12 +188,23 @@ def main():
             gt_pc = pred_handler.pc[idx] 
             gt_normal = None
             
+            points_iou = None
+            occ_tgt = None
+            obj_name = pred_handler.names[idx]
+            points_file = os.path.join(category_path, obj_name, "points.npz")
+
+            if os.path.exists(points_file):
+                try:
+                    points_dict = np.load(points_file)
+                    points_iou = points_dict['points']
+                    occ_tgt = points_dict['occupancies']
+                    if np.issubdtype(occ_tgt.dtype, np.uint8):
+                         occ_tgt = np.unpackbits(occ_tgt)[:points_iou.shape[0]]
+                except Exception as e:
+                    print(f"Failed to load points.npz for {obj_name}: {e}")
+            
             try:
-                # Use get_outdict instead of eval_mesh to avoid IoU calc
-                num_points = gt_pc.shape[0]
-                pc_pred, idx_face = mesh.sample(num_points, return_index=True)
-                normals_pred = mesh.face_normals[idx_face]
-                out_dict_cur = get_outdict(gt_pc, gt_normal, pc_pred, normals_pred)
+                out_dict_cur = eval_mesh(mesh, gt_pc, gt_normal, points_iou, occ_tgt)
             except Exception as e:
                 print(f"Eval mesh failed: {e}")
                 continue
@@ -201,6 +212,7 @@ def main():
             num_prim = (pred_handler.exist[idx] > 0.5).sum()
             aggregated_metrics['chamfer-L1'] += out_dict_cur['chamfer-L1']
             aggregated_metrics['chamfer-L2'] += out_dict_cur['chamfer-L2']
+            aggregated_metrics['iou'] += out_dict_cur.get('iou', 0.0)
             aggregated_metrics['num_primitives'] += num_prim
             aggregated_metrics['count'] += 1
             
@@ -219,11 +231,13 @@ def main():
     if count > 0:
         mean_chamfer_l1 = aggregated_metrics['chamfer-L1'] / count
         mean_chamfer_l2 = aggregated_metrics['chamfer-L2'] / count
+        mean_iou = aggregated_metrics['iou'] / count
         mean_num_primitives = aggregated_metrics['num_primitives'] / count
         
         print("\n----- Evaluation Results -----")
         print(f"{'mean_chamfer_l1':>25}: {mean_chamfer_l1:.6f}")
         print(f"{'mean_chamfer_l2':>25}: {mean_chamfer_l2:.6f}")
+        print(f"{'mean_iou':>25}: {mean_iou:.6f}")
         print(f"{'avg_num_primitives':>25}: {mean_num_primitives:.6f}")
         
         # Sort by Chamfer-L1 descending (worst first)

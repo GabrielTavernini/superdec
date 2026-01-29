@@ -27,6 +27,7 @@ class BatchSuperQMulti(nn.Module):
         self.device = device
         self.truncation = truncation
         self.pred_handler = pred_handler
+        self.minS = 0.01
         self.minE, self.maxE = 0.1, 1.9
 
         B = len(indices)
@@ -56,7 +57,7 @@ class BatchSuperQMulti(nn.Module):
             t = torch.tensor(pred_handler.translation[idx], dtype=torch.float, device=device).reshape(-1, 3)
             
             s[~mask.reshape(-1)] = 1.0 
-            scale_list.append(torch.log(s))
+            scale_list.append(torch.log(torch.clamp(s - self.minS, min=1e-6)))
             e = torch.clamp(e, self.minE + 1e-4, self.maxE - 1e-4)
             exp_list.append(torch.logit((e - self.minE) / (self.maxE - self.minE)))
             rot_list.append(mat2quat(r))
@@ -146,7 +147,7 @@ class BatchSuperQMulti(nn.Module):
                 self.outside_valid_mask[i, :n] = True
 
     def scale(self):
-        return torch.exp(self.raw_scale) + 1e-6
+        return torch.exp(self.raw_scale) + self.minS
         
     def exponents(self):
         return (torch.sigmoid(self.raw_exponents) * (self.maxE - self.minE)) + self.minE
