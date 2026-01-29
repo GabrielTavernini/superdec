@@ -25,19 +25,16 @@ def visualize_handler(server, superq, sdf_values, outside_values, plot = False):
     outside_values = outside_values.detach().cpu()
 
     pred_handler, meshes = superq.update_handler()
-    batch_idx = 0
-    obj_idx = superq.indices[batch_idx]
     if plot:
         plot_pred_handler(pred_handler, superq.truncation)
 
-    mesh = meshes[obj_idx]
+    mesh = meshes[superq.indices[0]]
     server.scene.add_mesh_trimesh("superquadrics", mesh=mesh, visible=True)
 
-    points = superq.points[batch_idx].detach().cpu().numpy()
-
+    points = superq.points[0].detach().cpu().numpy()
     cmap = plt.get_cmap('RdBu')
     norm = plt.Normalize(vmin=-superq.truncation, vmax=superq.truncation)
-    sdf_arr = sdf_values[batch_idx].numpy()
+    sdf_arr = sdf_values[0].numpy()
     sdf_colors = cmap(norm(sdf_arr))[:, :3]
     server.scene.add_point_cloud(
         name="/sdf_pointcloud",
@@ -47,8 +44,8 @@ def visualize_handler(server, superq, sdf_values, outside_values, plot = False):
     )
 
     # Add outside points
-    p2 = superq.outside_points[batch_idx].detach().cpu().numpy()
-    outside_arr = outside_values[batch_idx].numpy()
+    p2 = superq.outside_points[0].detach().cpu().numpy()
+    outside_arr = outside_values[0].numpy()
     outside_colors = cmap(norm(outside_arr))[:, :3]
     server.scene.add_point_cloud(
         name="/outside_pointcloud",
@@ -77,11 +74,10 @@ def main():
     
     # center the object (batch 0)
     with torch.no_grad():
-        b = 0
-        center = torch.mean(superq.points[b], dim=0)
-        superq.points[b] -= center
-        superq.outside_points[b] -= center
-        superq.translation.data[b] -= center
+        center = torch.mean(superq.points[0], dim=0)
+        superq.points[0] -= center
+        superq.outside_points[0] -= center
+        superq.translation.data[0] -= center
 
     pred_handler, meshes = superq.update_handler()
     orig_mesh = meshes[superq.indices[0]]

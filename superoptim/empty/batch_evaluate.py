@@ -10,7 +10,7 @@ import random
 
 def main():
     input_npz = "data/output_npz/shapenet_test.npz"
-    output_npz = "data/output_npz/shapenet_test_tables_optimized_0neg_loss.npz"
+    output_npz = "data/output_npz/shapenet_test_tables_optimized.npz"
 
     # server = viser.ViserServer()
     # server.scene.set_up_direction([0.0, 1.0, 0.0])
@@ -30,7 +30,7 @@ def main():
         if os.path.exists(os.path.join(category_path, name)):
             valid_indices.append(i)
 
-    valid_indices = valid_indices[:32] # Limit to 32 objects for testing
+    # valid_indices = valid_indices[:32] # Limit to 32 objects for testing
     print(f"Loaded {len(valid_indices)} objects from category 04379243 out of {pred_handler.scale.shape[0]}.")
 
     device = "cuda" if torch.cuda.is_available() else "cpu"

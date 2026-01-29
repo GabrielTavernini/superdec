@@ -27,14 +27,14 @@ class BatchSuperQMulti(nn.Module):
         self.device = device
         self.truncation = truncation
         self.pred_handler = pred_handler
-        self.minS = 0.01
+        self.minS = 0.002
         self.minE, self.maxE = 0.1, 1.9
 
         B = len(indices)
         self.N_max = pred_handler.scale.shape[1]
         
         self.M_points = 4096
-        self.K_outside = 6144
+        self.K_outside = 7168
 
         scale_list = []
         exp_list = []
@@ -138,6 +138,8 @@ class BatchSuperQMulti(nn.Module):
         self.translation = nn.Parameter(torch.stack(trans_list)) # (B, N, 3)
         self.raw_tapering = nn.Parameter(torch.full((B, self.N_max, 2), 1e-4, dtype=torch.float, device=device))
         
+        self.raw_assign_matrix = nn.Parameter(torch.ones((B, self.N_max, self.M_points), dtype=torch.float, device=device))
+
         self.exist_mask = torch.stack(self.masks) # (B, N)
 
     def scale(self):
@@ -152,11 +154,15 @@ class BatchSuperQMulti(nn.Module):
     def tapering(self):
         return torch.tanh(self.raw_tapering)
 
+    def assign_matrix(self):
+        return F.softmax(self.raw_assign_matrix, dim=1)
+
     def get_param_groups(self):
         lrs = {
-            "raw_scale": 5e-2,
+            "raw_scale": 1e-2,
             "raw_exponents": 1e-2,
             "raw_tapering": 5e-4,
+            "raw_assign_matrix": 5e-2,
         }
         groups = []
         for name, param in self.named_parameters():
@@ -225,17 +231,16 @@ class BatchSuperQMulti(nn.Module):
         # SDF loss per point
         pos_part = torch.clamp(sdf_values, min=0.0)
         neg_part = torch.clamp(sdf_values, max=0.0)
-        denom = (weight_pos + weight_neg)
-        Lsdf_b = (weight_pos * pos_part + weight_neg * torch.abs(neg_part)) / denom
+        Lsdf_b = weight_pos * pos_part + weight_neg * torch.abs(neg_part)
         
         # Simplified: Lsdf_b (B, M) -> mean over fixed M points
         Lsdf = Lsdf_b.mean(dim=1)
-        
+
         # Regularization term per primitive
         outside_ratio = counts_outside / (counts_points + counts_outside + 1e-6)
-        scale_weights = 1.0 + 10.0 * outside_ratio
+        scale_weights = 1.0 + 20.0 * outside_ratio
         norms = torch.norm(self.scale(), p=1, dim=2) # (B, N)
-        
+
         mask_exist = self.exist_mask
         Lreg_b = scale_weights * norms
         
@@ -245,12 +250,11 @@ class BatchSuperQMulti(nn.Module):
         
         Lreg = torch.zeros(B, device=device)
         valid_mask = counts > 0
-        Lreg[valid_mask] = 0.005 * sum_vals[valid_mask] / counts[valid_mask]
+        Lreg[valid_mask] = (self.truncation / 10) * sum_vals[valid_mask] / counts[valid_mask]
 
         # Empty/outside term
         Lempty_val = torch.relu(-outside_values)
-        # Simplified: mean over fixed K points
-        Lempty = 0.5 * Lempty_val.mean(dim=1)
+        Lempty = (self.truncation * 50) * Lempty_val.mean(dim=1)
         
         loss = Lsdf + Lreg + Lempty
         return loss, {"Lsdf": Lsdf, "Lreg": Lreg, "Lempty": Lempty}
@@ -271,7 +275,7 @@ class BatchSuperQMulti(nn.Module):
         sdfs_points = all_sdfs[:, :, :split_idx] 
         leaky_points = all_sdfs_leaky[:, :, :split_idx]
         
-        logits = -100.0 * sdfs_points
+        logits = self.raw_assign_matrix
         # Ensure invalid primitives have 0 weight in softmax
         mask_expanded_points = self.exist_mask.unsqueeze(-1).expand_as(logits)
         logits = torch.where(mask_expanded_points, logits, torch.tensor(-float('inf'), device=logits.device))
@@ -317,4 +321,3 @@ class BatchSuperQMulti(nn.Module):
              return self.pred_handler, self.pred_handler.get_meshes(resolution=30)
          else:
              return self.pred_handler
-

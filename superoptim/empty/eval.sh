@@ -8,4 +8,4 @@
 #SBATCH --output=logs/slurm-%j.out
 
 
-python -m superoptim.empty_tapering.batch_evaluate
+python -m superoptim.empty.batch_evaluate
