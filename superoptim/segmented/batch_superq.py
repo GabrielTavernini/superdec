@@ -18,8 +18,8 @@ class BatchSuperQMulti(nn.Module):
         self, 
         pred_handler: PredictionHandler,
         indices: list[int],
-        truncation: float = 0.1,
         ply_paths: list[str] = None,
+        truncation: float = 0.02,
         device: str = "cuda",
     ):
         super().__init__()
@@ -219,7 +219,7 @@ class BatchSuperQMulti(nn.Module):
         sdf = safe_mul(r0, (1 - f_func))
         return sdf
 
-    def compute_losses(self, forward_out, weight_pos: float = 2.0, weight_neg: float = 1.0):
+    def compute_losses(self, forward_out, weight_pos: float = 2.0, weight_neg: float = 0.0):
         sdf_values = forward_out.get('sdf_values')
         outside_values = forward_out.get('outside_values')
         counts_points = forward_out.get('counts_points')

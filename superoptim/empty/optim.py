@@ -62,10 +62,8 @@ def main():
     pred_handler = PredictionHandler.from_npz(f"data/output_npz/objects/{object_name}.npz")
     print(f"Optimizing {pred_handler.names[0]}")
     
-    truncation = 0.05
     superq = BatchSuperQMulti(
         pred_handler=pred_handler,
-        truncation=truncation,
         indices=[0],
         ply_paths=[f"data/ShapeNet/04379243/{pred_handler.names[0]}/pointcloud.npz"],
     )

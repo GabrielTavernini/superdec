@@ -18,8 +18,8 @@ class BatchSuperQMulti(nn.Module):
         self, 
         pred_handler: PredictionHandler,
         indices: list[int],
-        truncation: float = 0.1,
         ply_paths: list[str] = None,
+        truncation: float = 0.05,
         device: str = "cuda",
     ):
         super().__init__()

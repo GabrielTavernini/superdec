@@ -3,14 +3,30 @@ import torch
 import numpy as np
 from tqdm import tqdm
 from superdec.utils.predictions_handler_extended import PredictionHandler
-from ..evaluation import get_outdict, eval_mesh
-from .batch_superq import BatchSuperQMulti
 import viser
 import random
+import argparse
+import importlib
+
+from .evaluation import get_outdict, eval_mesh
 
 def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--type", type=str, default="empty", help="Type of superq module (empty, segmented, etc.)")
+    args = parser.parse_args()
+
+    try:
+        # Import dynamically based on type
+        module_name = f"superoptim.{args.type}.batch_superq"
+        module = importlib.import_module(module_name)
+        BatchSuperQMulti = module.BatchSuperQMulti
+    except ImportError:
+        print(f"Error importing BatchSuperQMulti for type '{args.type}': {e}")
+        return
+
+    print(f"Evaluating {args.type}...")
     input_npz = "data/output_npz/shapenet_test.npz"
-    output_npz = "data/output_npz/shapenet_test_tables_optimized.npz"
+    output_npz = f"data/output_npz/shapenet_test_tables_optimized_{args.type}.npz"
 
     # server = viser.ViserServer()
     # server.scene.set_up_direction([0.0, 1.0, 0.0])
@@ -34,7 +50,6 @@ def main():
     print(f"Loaded {len(valid_indices)} objects from category 04379243 out of {pred_handler.scale.shape[0]}.")
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    truncation = 0.05
     num_epochs = 1000
     
     # Store aggregated metrics
@@ -59,7 +74,6 @@ def main():
         superq = BatchSuperQMulti(
             pred_handler=pred_handler,
             indices=batch_indices,
-            truncation=truncation,
             ply_paths=ply_paths,
             device=device
         )
@@ -175,13 +189,27 @@ def main():
             object_metrics.append({
                 'index': idx,
                 'name': pred_handler.names[idx],
-                'chamfer-L1': out_dict_cur['chamfer-L1']
+                'chamfer-L1': out_dict_cur['chamfer-L1'],
+                'chamfer-L2': out_dict_cur['chamfer-L2'],
+                'iou': out_dict_cur.get('iou', 0.0),
+                'num_primitives': int(num_prim)
             })
 
     # Save results
     print(f"Saving optimized results to {output_npz}...")
     pred_handler.save_npz(output_npz)
     
+    # Save detailed metrics
+    metrics_csv = output_npz.replace(".npz", "_metrics.csv")
+    print(f"Saving per-object metrics to {metrics_csv}...")
+    import csv
+    with open(metrics_csv, 'w', newline='') as csvfile:
+        fieldnames = ['index', 'name', 'chamfer-L1', 'chamfer-L2', 'iou', 'num_primitives']
+        writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
+        writer.writeheader()
+        for data in object_metrics:
+            writer.writerow(data)
+
     # Print Metrics
     count = aggregated_metrics['count']
     if count > 0:

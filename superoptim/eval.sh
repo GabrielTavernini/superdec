@@ -7,5 +7,7 @@
 #SBATCH --time=24:00:00
 #SBATCH --output=logs/slurm-%j.out
 
+# Default type if not provided
+TYPE=${1:-empty}
 
-python -m superoptim.empty.batch_evaluate
+python -m superoptim.batch_evaluate --type "$TYPE"
