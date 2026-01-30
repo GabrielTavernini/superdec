@@ -2,7 +2,7 @@ import time
 import numpy as np
 import viser
 from scipy.spatial.transform import Rotation as R
-from superdec.utils.predictions_handler import PredictionHandler
+from superdec.utils.predictions_handler_extended import PredictionHandler
 
 def main():
     resolution = 30 
@@ -56,6 +56,9 @@ def main():
         gui_controls['e1'] = server.gui.add_slider("Eps 1", 0.01, 2.0, 0.01, 1.0)
         gui_controls['e2'] = server.gui.add_slider("Eps 2", 0.01, 2.0, 0.01, 1.0)
 
+        gui_controls['k1'] = server.gui.add_slider("K 1", -1, 1.0, 0.01, 0.0)
+        gui_controls['k2'] = server.gui.add_slider("K 2", -1, 1.0, 0.01, 0.0)
+
     # 4. Functions
     def render_all():
         """Regenerates and displays the mesh."""
@@ -84,6 +87,7 @@ def main():
         s = pred_handler.scale[B_IDX, p_idx]
         e = pred_handler.exponents[B_IDX, p_idx]
         r = R.from_matrix(pred_handler.rotation[B_IDX, p_idx]).as_euler('xyz', degrees=True)
+        k = pred_handler.tapering[B_IDX, p_idx]
 
         gui_controls['tx'].value = float(t[0])
         gui_controls['ty'].value = float(t[1])
@@ -96,6 +100,8 @@ def main():
         gui_controls['rz'].value = float(r[2])
         gui_controls['e1'].value = float(e[0])
         gui_controls['e2'].value = float(e[1])
+        gui_controls['k1'].value = float(k[0])
+        gui_controls['k2'].value = float(k[1])
         
         is_loading = False # Re-enable sync
         render_all()
@@ -114,6 +120,8 @@ def main():
         
         rot_obj = R.from_euler('xyz', [gui_controls['rx'].value, gui_controls['ry'].value, gui_controls['rz'].value], degrees=True)
         pred_handler.rotation[B_IDX, p_idx] = rot_obj.as_matrix()
+
+        pred_handler.tapering[B_IDX, p_idx] = [gui_controls['k1'].value, gui_controls['k2'].value]
 
         render_all()
 

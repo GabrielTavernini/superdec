@@ -93,7 +93,7 @@ def main():
 
     pred_handler, meshes = superq.update_handler()
     orig_mesh = meshes[superq.indices[0]]
-    plot_pred_handler(pred_handler, truncation, filename="superq_plot_orig.png")
+    plot_pred_handler(pred_handler, superq.truncation, filename="superq_plot_orig.png")
 
     server = viser.ViserServer()
     server.scene.set_up_direction([0.0, 1.0, 0.0])

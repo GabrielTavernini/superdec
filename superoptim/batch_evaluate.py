@@ -169,7 +169,7 @@ def main():
                     points_iou = points_dict['points']
                     occ_tgt = points_dict['occupancies']
                     if np.issubdtype(occ_tgt.dtype, np.uint8):
-                         occ_tgt = np.unpackbits(occ_tgt)[:points_iou.shape[0]]
+                        occ_tgt = np.unpackbits(occ_tgt)[:points_iou.shape[0]]
                 except Exception as e:
                     print(f"Failed to load points.npz for {obj_name}: {e}")
             

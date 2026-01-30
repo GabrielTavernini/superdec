@@ -34,7 +34,7 @@ class BatchSuperQMulti(nn.Module):
         self.N_max = pred_handler.scale.shape[1]
         
         self.M_points = 4096
-        self.K_outside = 6144
+        self.K_outside = 7168
 
         scale_list = []
         exp_list = []
