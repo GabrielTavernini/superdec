@@ -50,7 +50,7 @@ def main():
     print(f"Loaded {len(valid_indices)} objects from category 04379243 out of {pred_handler.scale.shape[0]}.")
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    num_epochs = 1000
+    num_epochs = 5_000 if args.type in ["iou"] else 1_000
     
     # Store aggregated metrics
     aggregated_metrics = {
@@ -81,16 +81,6 @@ def main():
         param_groups = superq.get_param_groups()
         optimizer = torch.optim.Adam(param_groups)
         
-        # Center objects
-        centers = []
-        with torch.no_grad():
-             for b in range(len(batch_indices)):
-                  c = superq.points[b].mean(dim=0)
-                  superq.points[b] -= c
-                  superq.outside_points[b] -= c
-                  superq.translation.data[b] -= c
-                  centers.append(c)
-        centers = torch.stack(centers)
 
         best_losses = [float('inf')] * len(batch_indices)
         best_params = [None] * len(batch_indices)        
@@ -137,9 +127,6 @@ def main():
                        superq.raw_tapering[b].copy_(best_params[b]["raw_tapering"])
                        superq.translation[b].copy_(best_params[b]["translation"])
 
-        # Restore Center
-        with torch.no_grad():
-            superq.translation.data += centers.unsqueeze(1)
 
         superq.update_handler(compute_meshes=False)
         
