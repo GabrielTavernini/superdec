@@ -188,16 +188,11 @@ class BatchSuperQMulti(nn.Module):
         union = (pred_occ + gt_occ - pred_occ * gt_occ).sum(dim=1)
         iou = intersection / torch.clamp(union, min=1.0)
 
-        # Regularization term per primitive
-        # mask = self.exist_mask.float()
-        # Lreg_b = torch.norm(self.scale(), p=2, dim=2) # (B, N)
-        # Lreg = 2e-2 * (Lreg_b * mask).mean(dim=1) # (B,)
-
         mask = self.exist_mask.float()
         Ltap_b = torch.norm(torch.abs(self.tapering()), p=1, dim=2) # (B, N)
         Ltap = 2e-1 * (Ltap_b * mask).mean(dim=1) # (B,)
         
-        loss = -torch.log(iou) + Ltap #+ Lreg
+        loss = -torch.log(iou) + Ltap
         return loss, {"iou": iou, "tap": Ltap}
     
     def forward(self):
@@ -214,18 +209,18 @@ class BatchSuperQMulti(nn.Module):
         }
 
     def update_handler(self, compute_meshes=True):
-         for i, idx in enumerate(self.indices):
-             mask = self.exist_mask[i].cpu().numpy()
-             if not np.any(mask): continue
-             
-             self.pred_handler.scale[idx][mask] = self.scale()[i][mask].detach().cpu().numpy()
-             self.pred_handler.exponents[idx][mask] = self.exponents()[i][mask].detach().cpu().numpy()
-             self.pred_handler.tapering[idx][mask] = self.tapering()[i][mask].detach().cpu().numpy()
-             self.pred_handler.rotation[idx][mask] = self.rotation()[i][mask].detach().cpu().numpy()
-             self.pred_handler.translation[idx][mask] = self.translation[i][mask].detach().cpu().numpy()
-             
-         if compute_meshes:
-             return self.pred_handler, self.pred_handler.get_meshes(resolution=30)
-         else:
-             return self.pred_handler
+        for i, idx in enumerate(self.indices):
+            mask = self.exist_mask[i].cpu().numpy()
+            if not np.any(mask): continue
+            
+            self.pred_handler.scale[idx][mask] = self.scale()[i][mask].detach().cpu().numpy()
+            self.pred_handler.exponents[idx][mask] = self.exponents()[i][mask].detach().cpu().numpy()
+            self.pred_handler.tapering[idx][mask] = self.tapering()[i][mask].detach().cpu().numpy()
+            self.pred_handler.rotation[idx][mask] = self.rotation()[i][mask].detach().cpu().numpy()
+            self.pred_handler.translation[idx][mask] = self.translation[i][mask].detach().cpu().numpy()
+            
+        if compute_meshes:
+            return self.pred_handler, self.pred_handler.get_meshes(resolution=30)
+        else:
+            return self.pred_handler
 

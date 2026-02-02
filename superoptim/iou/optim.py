@@ -36,11 +36,23 @@ def visualize_handler(server, superq, sdf_values, plot = False):
     sdf_arr = sdf_values[0].numpy()
     sdf_colors = cmap(norm(sdf_arr))[:, :3]
     server.scene.add_point_cloud(
-        name="/sdf_pointcloud",
+        name="/sdf_iou_points",
         points=points,
         colors=sdf_colors,
         point_size=0.005,
+        visible=False,
     )
+
+    gt_occ = superq.occupancies[0].detach().cpu().numpy().astype(bool)
+    pred_occ = sdf_arr < 0
+    mismatch_mask = gt_occ != pred_occ
+    if mismatch_mask.any():
+        server.scene.add_point_cloud(
+            name="/mismatch_points",
+            points=points[mismatch_mask],
+            colors=sdf_colors[mismatch_mask],
+            point_size=0.01,
+        )
 
 def main():
     if len(sys.argv) > 1:
@@ -64,6 +76,12 @@ def main():
 
     server = viser.ViserServer()
     server.scene.set_up_direction([0.0, 1.0, 0.0])
+
+    exist_vector = pred_handler.exist[superq.indices[0]].copy()
+    pred_handler.exist[superq.indices[0]] = np.ones((16, 1))
+    all_mesh = pred_handler.get_meshes(resolution=30)[superq.indices[0]]
+    pred_handler.exist[superq.indices[0]] = exist_vector
+    server.scene.add_mesh_trimesh("all_superquadrics", mesh=all_mesh, visible=False)
     server.scene.add_mesh_trimesh("original_superquadrics", mesh=orig_mesh, visible=False)
 
     # Segmented pointcloud for batch 0
@@ -74,17 +92,6 @@ def main():
     colored_pc = colors[segmentation]
     server.scene.add_point_cloud(
         name="/segmented_pointcloud",
-        points=points,
-        colors=colored_pc,
-        point_size=0.005,
-        visible=False,
-    )
-
-    points = superq.points[0].detach().cpu().numpy()
-    color = np.array([1.0, 0.0, 0.0])  # red
-    colored_pc = np.tile(color, (points.shape[0], 1))
-    server.scene.add_point_cloud(
-        name="/iou_points",
         points=points,
         colors=colored_pc,
         point_size=0.005,
@@ -132,7 +139,6 @@ def main():
         
         pbar.set_postfix({
             "IoU": f"{losses['iou'][0].item():.6f}",
-            # "Reg": f"{losses['reg'][0].item():.6f}",
             "Tap": f"{losses['tap'][0].item():.6f}",
             "Loss": f"{loss.item():.6f}"
         })
