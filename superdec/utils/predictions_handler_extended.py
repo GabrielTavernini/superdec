@@ -176,7 +176,7 @@ class PredictionHandler:
         fx = kx/scale[2] * z + 1
         fy = ky/scale[2] * z + 1
         x = x*fx
-        y = y*fx
+        y = y*fy
 
         # Apply bending transformation
         kb, alpha = bending
