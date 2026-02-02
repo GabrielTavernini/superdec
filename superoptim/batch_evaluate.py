@@ -7,6 +7,7 @@ import viser
 import random
 import argparse
 import importlib
+import gc
 
 from .evaluation import get_outdict, eval_mesh
 
@@ -63,7 +64,7 @@ def main():
     
     # Store per-object metrics for ranking
     object_metrics = [] # List of tuples: (index, name, chamfer_l1)
-    batch_size = 32
+    batch_size = 128
     
     for i in tqdm(range(0, len(valid_indices), batch_size), desc="Processing batches"):
         batch_indices = valid_indices[i : i + batch_size]
@@ -106,7 +107,7 @@ def main():
             # Save best parameters (based on Total Loss per object)
             with torch.no_grad():
                 for b in range(len(batch_indices)):
-                    current_loss = loss[b]
+                    current_loss = loss[b].item()
                     if current_loss < best_losses[b]:
                         best_losses[b] = current_loss
                         best_params[b] = {
@@ -130,6 +131,16 @@ def main():
 
         superq.update_handler(compute_meshes=False)
         
+        # Cleanup to avoid OOM
+        del superq
+        del optimizer
+        del param_groups
+        del best_params
+        del best_losses
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+
         # Evaluate
         for b_idx in range(len(batch_indices)):
             idx = batch_indices[b_idx]

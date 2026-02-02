@@ -17,5 +17,6 @@ data/*
 tmp*
 *.pt
 checkpoints*
+logs*
 
 results*
