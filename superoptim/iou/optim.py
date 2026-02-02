@@ -30,27 +30,36 @@ def visualize_handler(server, superq, sdf_values, plot = False):
     mesh = meshes[superq.indices[0]]
     server.scene.add_mesh_trimesh("superquadrics", mesh=mesh, visible=True)
 
+    M_ps = superq.M_points_surf
     points = superq.points[0].detach().cpu().numpy()
     cmap = plt.get_cmap('RdBu')
     norm = plt.Normalize(vmin=-superq.truncation, vmax=superq.truncation)
     sdf_arr = sdf_values[0].numpy()
     sdf_colors = cmap(norm(sdf_arr))[:, :3]
     server.scene.add_point_cloud(
+        name="/sdf_pointcloud",
+        points=points[-M_ps:],
+        colors=sdf_colors[-M_ps:],
+        point_size=0.005,
+        visible=False,
+    )
+
+    server.scene.add_point_cloud(
         name="/sdf_iou_points",
-        points=points,
-        colors=sdf_colors,
+        points=points[:-M_ps],
+        colors=sdf_colors[:-M_ps],
         point_size=0.005,
         visible=False,
     )
 
     gt_occ = superq.occupancies[0].detach().cpu().numpy().astype(bool)
     pred_occ = sdf_arr < 0
-    mismatch_mask = gt_occ != pred_occ
+    mismatch_mask = gt_occ != pred_occ[:-M_ps]
     if mismatch_mask.any():
         server.scene.add_point_cloud(
             name="/mismatch_points",
-            points=points[mismatch_mask],
-            colors=sdf_colors[mismatch_mask],
+            points=points[:-M_ps][mismatch_mask],
+            colors=sdf_colors[:-M_ps][mismatch_mask],
             point_size=0.01,
         )
 
@@ -139,6 +148,7 @@ def main():
         
         pbar.set_postfix({
             "IoU": f"{losses['iou'][0].item():.6f}",
+            "Sdf": f"{losses['sdf'][0].item():.6f}",
             "Tap": f"{losses['tap'][0].item():.6f}",
             "Loss": f"{loss.item():.6f}"
         })

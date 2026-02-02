@@ -37,7 +37,9 @@ class BatchSuperQMulti(nn.Module):
 
         B = len(indices)
         self.N_max = pred_handler.scale.shape[1]
-        self.M_points = 100_000
+        self.M_points_iou = 100_000
+        self.M_points_surf = 4096
+        self.M_points = self.M_points_iou + self.M_points_surf
 
         scale_list = []
         exp_list = []
@@ -46,7 +48,7 @@ class BatchSuperQMulti(nn.Module):
         self.masks = [] 
 
         self.points = torch.zeros(B, self.M_points, 3, device=device)
-        self.occupancies = torch.zeros(B, self.M_points, dtype=torch.bool, device=device)
+        self.occupancies = torch.zeros(B, self.M_points_iou, dtype=torch.bool, device=device)
         
         for i, idx in enumerate(indices):
             # --- Params ---
@@ -74,14 +76,16 @@ class BatchSuperQMulti(nn.Module):
                 occ_tgt = points_dict['occupancies']
                 if np.issubdtype(occ_tgt.dtype, np.uint8):
                     occ_tgt = np.unpackbits(occ_tgt)[:points_iou.shape[0]]
-                pts = torch.tensor(points_iou, dtype=torch.float, device=device)
                 occ = torch.tensor(occ_tgt, dtype=torch.bool, device=device)
+                pts_iou = torch.tensor(points_iou, dtype=torch.float, device=device)
+                pts_surf = torch.tensor(pred_handler.pc[i], dtype=torch.float, device=device)
+                pts = torch.cat([pts_iou, pts_surf], dim=0)
             except Exception as e:
                 print(f"Error loading {points_file}: {e}")
                 exit()
             
             # Ensure pts has correct shape if not loaded from ply
-            if pts.shape[0] != self.M_points and occ.shape[0] != self.M_points:
+            if pts.shape[0] != self.M_points and occ.shape[0] != self.M_points_iou:
                 print(f"Error points shape missmatch")
                 exit()
             
@@ -115,8 +119,8 @@ class BatchSuperQMulti(nn.Module):
     def get_param_groups(self):
         lrs = {
             "raw_scale": 2e-2,
-            "raw_exponents": 1e-2,
-            "raw_tapering": 5e-4,
+            "raw_exponents": 5e-3,
+            "raw_tapering": 6e-3,
         }
         groups = []
         for name, param in self.named_parameters():
@@ -165,7 +169,7 @@ class BatchSuperQMulti(nn.Module):
         x = x / fx
         y = y / fy
         
-        # r0 = torch.sqrt(x**2 + y**2 + z**2)
+        r0 = torch.sqrt(x**2 + y**2 + z**2)
         
         term1 = safe_pow(safe_pow(x / sx, 2), 1 / e2)
         term2 = safe_pow(safe_pow(y / sy, 2), 1 / e2)
@@ -173,27 +177,32 @@ class BatchSuperQMulti(nn.Module):
         
         f_func = safe_pow(safe_pow(term1 + term2, e2 / e1) + term3, -e1 / 2)
         
-        # sdf = safe_mul(r0, (1 - f_func))
-        sdf = (1 - f_func)
+        sdf = safe_mul(r0, (1 - f_func))
+        # sdf = (1 - f_func)
         return sdf
     
     def compute_losses(self, forward_out):
         sdfs = forward_out.get('sdfs')
         
         temperature = 1e-3
-        pred_occ = torch.sigmoid(-sdfs / temperature)
+        sdfs_iou = sdfs[:, :self.M_points_iou]
+        pred_occ = torch.sigmoid(-sdfs_iou / temperature)
         gt_occ = self.occupancies.float()
 
         intersection = (pred_occ * gt_occ).sum(dim=1)
         union = (pred_occ + gt_occ - pred_occ * gt_occ).sum(dim=1)
         iou = intersection / torch.clamp(union, min=1.0)
 
+        # SDF Loss on surface points
+        sdfs_surf = sdfs[:, self.M_points_iou:]
+        Lsdf = 4 * torch.mean(torch.abs(torch.nn.LeakyReLU()(sdfs_surf)), dim=1) # (B,)
+
         mask = self.exist_mask.float()
         Ltap_b = torch.norm(torch.abs(self.tapering()), p=1, dim=2) # (B, N)
         Ltap = 2e-1 * (Ltap_b * mask).mean(dim=1) # (B,)
         
-        loss = -torch.log(iou) + Ltap
-        return loss, {"iou": iou, "tap": Ltap}
+        loss = -torch.log(iou) + Ltap + Lsdf
+        return loss, {"iou": iou, "tap": Ltap, "sdf": Lsdf}
     
     def forward(self):
         all_sdfs = self.sdf_batch(self.points.transpose(1, 2)) # (B, N, M_total)
