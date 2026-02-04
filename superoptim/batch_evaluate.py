@@ -51,13 +51,16 @@ def main():
     print(f"Loaded {len(valid_indices)} objects from category 04379243 out of {pred_handler.scale.shape[0]}.")
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    num_epochs = 5_000 if args.type in ["iou"] else 1_000
+    num_epochs = 1_000
     
     # Store aggregated metrics
     aggregated_metrics = {
         'chamfer-L1': 0.0,
         'chamfer-L2': 0.0,
         'iou': 0.0,
+        'f-score': 0.0,
+        'f-score-15': 0.0,
+        'f-score-20': 0.0,
         'num_primitives': 0.0,
         'count': 0
     }
@@ -95,7 +98,7 @@ def main():
 
             # Compute per-batch losses using shared function
             loss, _ = superq.compute_losses(forward_out)
-            batch_loss = loss.sum()
+            batch_loss = loss.mean()
 
             if torch.isnan(batch_loss):
                 print(f"nan loss at epoch {epoch}")
@@ -181,6 +184,9 @@ def main():
             aggregated_metrics['chamfer-L1'] += out_dict_cur['chamfer-L1']
             aggregated_metrics['chamfer-L2'] += out_dict_cur['chamfer-L2']
             aggregated_metrics['iou'] += out_dict_cur.get('iou', 0.0)
+            aggregated_metrics['f-score'] += out_dict_cur.get('f-score', 0.0)
+            aggregated_metrics['f-score-15'] += out_dict_cur.get('f-score-15', 0.0)
+            aggregated_metrics['f-score-20'] += out_dict_cur.get('f-score-20', 0.0)
             aggregated_metrics['num_primitives'] += num_prim
             aggregated_metrics['count'] += 1
             
@@ -190,6 +196,9 @@ def main():
                 'chamfer-L1': out_dict_cur['chamfer-L1'],
                 'chamfer-L2': out_dict_cur['chamfer-L2'],
                 'iou': out_dict_cur.get('iou', 0.0),
+                'f-score': out_dict_cur.get('f-score', 0.0),
+                'f-score-15': out_dict_cur.get('f-score-15', 0.0),
+                'f-score-20': out_dict_cur.get('f-score-20', 0.0),
                 'num_primitives': int(num_prim)
             })
 
@@ -202,7 +211,7 @@ def main():
     print(f"Saving per-object metrics to {metrics_csv}...")
     import csv
     with open(metrics_csv, 'w', newline='') as csvfile:
-        fieldnames = ['index', 'name', 'chamfer-L1', 'chamfer-L2', 'iou', 'num_primitives']
+        fieldnames = ['index', 'name', 'chamfer-L1', 'chamfer-L2', 'iou', 'f-score', 'f-score-15', 'f-score-20', 'num_primitives']
         writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
         writer.writeheader()
         for data in object_metrics:
@@ -214,12 +223,18 @@ def main():
         mean_chamfer_l1 = aggregated_metrics['chamfer-L1'] / count
         mean_chamfer_l2 = aggregated_metrics['chamfer-L2'] / count
         mean_iou = aggregated_metrics['iou'] / count
+        mean_fscore = aggregated_metrics['f-score'] / count
+        mean_fscore_15 = aggregated_metrics['f-score-15'] / count
+        mean_fscore_20 = aggregated_metrics['f-score-20'] / count
         mean_num_primitives = aggregated_metrics['num_primitives'] / count
         
         print("\n----- Evaluation Results -----")
         print(f"{'mean_chamfer_l1':>25}: {mean_chamfer_l1:.6f}")
         print(f"{'mean_chamfer_l2':>25}: {mean_chamfer_l2:.6f}")
         print(f"{'mean_iou':>25}: {mean_iou:.6f}")
+        print(f"{'mean_f-score':>25}: {mean_fscore:.6f}")
+        print(f"{'mean_f-score-15':>25}: {mean_fscore_15:.6f}")
+        print(f"{'mean_f-score-20':>25}: {mean_fscore_20:.6f}")
         print(f"{'avg_num_primitives':>25}: {mean_num_primitives:.6f}")
         
         # Sort by Chamfer-L1 descending (worst first)

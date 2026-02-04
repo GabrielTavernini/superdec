@@ -78,7 +78,7 @@ class BatchSuperQMulti(nn.Module):
                     occ_tgt = np.unpackbits(occ_tgt)[:points_iou.shape[0]]
                 occ = torch.tensor(occ_tgt, dtype=torch.bool, device=device)
                 pts_iou = torch.tensor(points_iou, dtype=torch.float, device=device)
-                pts_surf = torch.tensor(pred_handler.pc[i], dtype=torch.float, device=device)
+                pts_surf = torch.tensor(pred_handler.pc[idx], dtype=torch.float, device=device)
                 pts = torch.cat([pts_iou, pts_surf], dim=0)
             except Exception as e:
                 print(f"Error loading {points_file}: {e}")
@@ -119,8 +119,8 @@ class BatchSuperQMulti(nn.Module):
     def get_param_groups(self):
         lrs = {
             "raw_scale": 2e-2,
-            "raw_exponents": 5e-3,
-            "raw_tapering": 6e-3,
+            "raw_exponents": 1e-2,
+            "raw_tapering": 5e-4,
         }
         groups = []
         for name, param in self.named_parameters():
@@ -195,7 +195,7 @@ class BatchSuperQMulti(nn.Module):
 
         # SDF Loss on surface points
         sdfs_surf = sdfs[:, self.M_points_iou:]
-        Lsdf = 4 * torch.mean(torch.abs(torch.nn.LeakyReLU()(sdfs_surf)), dim=1) # (B,)
+        Lsdf = torch.mean(torch.relu(sdfs_surf), dim=1) # (B,)
 
         mask = self.exist_mask.float()
         Ltap_b = torch.norm(torch.abs(self.tapering()), p=1, dim=2) # (B, N)

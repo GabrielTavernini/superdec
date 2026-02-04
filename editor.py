@@ -16,7 +16,7 @@ def main():
     is_loading = False
 
     # Get static point cloud context
-    pcs = pred_handler.get_segmented_pcs()[B_IDX]
+    pcs = pred_handler.get_segmented_pc(B_IDX)
 
     # 2. Setup Viser
     server = viser.ViserServer()
@@ -69,7 +69,7 @@ def main():
     # 4. Functions
     def render_all():
         """Regenerates and displays the mesh."""
-        full_mesh = pred_handler.get_meshes(resolution=resolution)[B_IDX]
+        full_mesh = pred_handler.get_mesh(B_IDX, resolution=resolution)
         server.scene.add_mesh_trimesh(
             name="/superquadrics/batch_0",
             mesh=full_mesh,
