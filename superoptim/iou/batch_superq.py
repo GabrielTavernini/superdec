@@ -70,6 +70,9 @@ class BatchSuperQMulti(nn.Module):
             # --- Points ---
             try:
                 ply = ply_paths[i] if ply_paths else None
+                # pc = np.array(np.load(ply)['points'])
+                # pc_idx = np.random.choice(pc.shape[0], self.M_points_surf, replace=False)
+                # pts_surf = torch.tensor(pc[pc_idx], dtype=torch.float, device=device)
                 points_file = ply.replace("pointcloud.npz", "points.npz")
                 points_dict = np.load(points_file)
                 points_iou = points_dict['points']
@@ -194,15 +197,13 @@ class BatchSuperQMulti(nn.Module):
         iou = intersection / torch.clamp(union, min=1.0)
 
         # SDF Loss on surface points
+        temperature = 1e-2
         sdfs_surf = sdfs[:, self.M_points_iou:]
-        Lsdf = torch.mean(torch.relu(sdfs_surf), dim=1) # (B,)
-
-        mask = self.exist_mask.float()
-        Ltap_b = torch.norm(torch.abs(self.tapering()), p=1, dim=2) # (B, N)
-        Ltap = 2e-1 * (Ltap_b * mask).mean(dim=1) # (B,)
+        sdfs_surf = (torch.sigmoid(sdfs_surf / temperature) - 0.5) * 2 * self.truncation
+        Lsdf = 5 * torch.mean(torch.abs(sdfs_surf), dim=1) # (B,)
         
-        loss = -torch.log(iou) + Ltap + Lsdf
-        return loss, {"iou": iou, "tap": Ltap, "sdf": Lsdf}
+        loss = -torch.log(iou) + Lsdf
+        return loss, {"iou": iou, "sdf": Lsdf}
     
     def forward(self):
         all_sdfs = self.sdf_batch(self.points.transpose(1, 2)) # (B, N, M_total)
@@ -212,7 +213,9 @@ class BatchSuperQMulti(nn.Module):
         all_sdfs[~mask] = float('inf')
 
         # Union is min(sdf)
-        min_sdf, _ = torch.min(all_sdfs, dim=1) # (B, M)
+        # min_sdf, _ = torch.min(all_sdfs, dim=1) # (B, M)
+        tau = 0.01  # smaller = sharper min
+        min_sdf = -tau * torch.logsumexp(-all_sdfs / tau, dim=1)  # (B, M)
         return {
             'sdfs': min_sdf,
         }

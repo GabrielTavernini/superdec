@@ -147,10 +147,9 @@ def main():
             visualize_handler(server, superq, sdf_vals)
         
         pbar.set_postfix({
-            "IoU": f"{losses['iou'][0].item():.6f}",
-            "Sdf": f"{losses['sdf'][0].item():.6f}",
-            "Tap": f"{losses['tap'][0].item():.6f}",
-            "Loss": f"{loss.item():.6f}"
+            "IoU": f"{losses['iou'][0].item():.2f}",
+            "Sdf": f"{losses['sdf'][0].item():.4f}",
+            "Loss": f"{loss.item():.4f}"
         })
 
     # Restore best parameters
