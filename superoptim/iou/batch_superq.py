@@ -70,9 +70,6 @@ class BatchSuperQMulti(nn.Module):
             # --- Points ---
             try:
                 ply = ply_paths[i] if ply_paths else None
-                # pc = np.array(np.load(ply)['points'])
-                # pc_idx = np.random.choice(pc.shape[0], self.M_points_surf, replace=False)
-                # pts_surf = torch.tensor(pc[pc_idx], dtype=torch.float, device=device)
                 points_file = ply.replace("pointcloud.npz", "points.npz")
                 points_dict = np.load(points_file)
                 points_iou = points_dict['points']
@@ -82,6 +79,10 @@ class BatchSuperQMulti(nn.Module):
                 occ = torch.tensor(occ_tgt, dtype=torch.bool, device=device)
                 pts_iou = torch.tensor(points_iou, dtype=torch.float, device=device)
                 pts_surf = torch.tensor(pred_handler.pc[idx], dtype=torch.float, device=device)
+                # ply = ply.replace("pointcloud.npz", "pointcloud_4096.npz")
+                # pc = np.array(np.load(ply)['points'])
+                # pc_idx = np.random.choice(pc.shape[0], self.M_points_surf, replace=False)
+                # pts_surf = torch.tensor(pc[pc_idx], dtype=torch.float, device=device)
                 pts = torch.cat([pts_iou, pts_surf], dim=0)
             except Exception as e:
                 print(f"Error loading {points_file}: {e}")
@@ -102,6 +103,10 @@ class BatchSuperQMulti(nn.Module):
         self.raw_tapering = nn.Parameter(torch.full((B, self.N_max, 2), 1e-4, dtype=torch.float, device=device))
         
         self.exist_mask = torch.stack(self.masks) # (B, N)
+        self.bbox_min = torch.min(self.points[:, self.M_points_iou:], dim=1).values.unsqueeze(1).unsqueeze(2)  # (B,3)
+        self.bbox_max = torch.max(self.points[:, self.M_points_iou:], dim=1).values.unsqueeze(1).unsqueeze(2)  # (B,3)
+        self.bbox_min -= (self.bbox_max - self.bbox_min) * .025
+        self.bbox_max += (self.bbox_max - self.bbox_min) * .025
 
     @torch.compile
     def scale(self):
@@ -184,6 +189,32 @@ class BatchSuperQMulti(nn.Module):
         # sdf = (1 - f_func)
         return sdf
     
+    @torch.compile
+    def poles(self):
+        B, N, _ = self.scale().shape
+
+        s = self.scale()      # (B,N,3)
+        R = self.rotation()   # (B,N,3,3)
+        t = self.translation  # (B,N,3)
+
+        local = torch.zeros(B, N, 6, 3, device=s.device)
+        local[:,:,0,0] =  s[:,:,0]  # +x
+        local[:,:,1,0] = -s[:,:,0]  # -x
+        local[:,:,2,1] =  s[:,:,1]  # +y
+        local[:,:,3,1] = -s[:,:,1]  # -y
+        local[:,:,4,2] =  s[:,:,2]  # +z
+        local[:,:,5,2] = -s[:,:,2]  # -z
+
+        # rotate
+        poles_world = torch.matmul(
+            R.unsqueeze(2),     # (B,N,1,3,3)
+            local.unsqueeze(-1) # (B,N,6,3,1)
+        ).squeeze(-1)
+
+        # translate
+        poles_world = poles_world + t.unsqueeze(2)
+        return poles_world
+    
     def compute_losses(self, forward_out):
         sdfs = forward_out.get('sdfs')
         
@@ -200,10 +231,16 @@ class BatchSuperQMulti(nn.Module):
         temperature = 1e-2
         sdfs_surf = sdfs[:, self.M_points_iou:]
         sdfs_surf = (torch.sigmoid(sdfs_surf / temperature) - 0.5) * 2 * self.truncation
-        Lsdf = 5 * torch.mean(torch.abs(sdfs_surf), dim=1) # (B,)
+        Lsdf = 8 * torch.mean(torch.abs(sdfs_surf), dim=1) # (B,)
         
-        loss = -torch.log(iou) + Lsdf
-        return loss, {"iou": iou, "sdf": Lsdf}
+        poles = self.poles()   # (B,N,6,3)
+        mask = self.exist_mask.unsqueeze(-1)
+        violation = torch.relu(self.bbox_min - poles) + torch.relu(poles - self.bbox_max)   # (B,N,6,3)
+        dist = torch.linalg.norm(violation, dim=-1)  # (B,N,6)
+        L_bbox = (dist * mask).sum(dim=2).mean(dim=1)
+        
+        loss = -torch.log(iou) + Lsdf + L_bbox
+        return loss, {"iou": iou, "sdf": Lsdf, "bbox": L_bbox}
     
     def forward(self):
         all_sdfs = self.sdf_batch(self.points.transpose(1, 2)) # (B, N, M_total)
