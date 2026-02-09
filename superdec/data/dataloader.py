@@ -136,7 +136,6 @@ class ScenesDataset(Dataset):
     def name(self):
         return 'ScenesDataset'
 
-
 class Scene(Dataset):
     def __init__(self, cfg):
         super().__init__()
@@ -183,8 +182,6 @@ class Scene(Dataset):
 
     def name(self):
         return 'Scene'
-
-
 
 class ShapeNet(Dataset):
     def __init__(self, split: str, cfg):
@@ -266,3 +263,89 @@ class ShapeNet(Dataset):
 
     def name(self):
         return 'ShapeNet'
+
+class ABO(Dataset):
+    def __init__(self, split: str, cfg):
+        super().__init__()
+        self.split = split
+        self.data_root = cfg.abo.path
+
+        self.transform = get_transforms(split, cfg)
+        self.normalize = cfg.abo.normalize if 'normalize' in cfg.abo else True
+
+        self.models = self._gather_models()
+
+    def _gather_models(self):
+        if not os.path.exists(self.data_root):
+            print(f"ABO data root not found: {self.data_root}")
+            return []
+        
+        # List all subdirectories (ASINs)
+        models = [d for d in os.listdir(self.data_root) if os.path.isdir(os.path.join(self.data_root, d))]
+        # models = [d for d in models if len(os.listdir(os.path.join(self.data_root, d))) > 0]
+        models.sort() # Ensure deterministic order
+        
+        # Simple deterministic split: 80% train, 10% val, 10% test
+        n_models = len(models)
+        n_train = int(n_models * 0.8)
+        n_val = int(n_models * 0.9)
+        
+        if self.split == 'train':
+            models = models[:n_train]
+        elif self.split == 'val':
+            models = models[n_train:n_val]
+        elif self.split == 'test':
+            models = models[n_val:]
+        else:
+            print(f"Unknown split {self.split} for ABO, using all data")
+        
+        return [{'model_id': m} for m in models]
+
+    def __len__(self):
+        return len(self.models)
+
+    def __getitem__(self, idx):
+        model = self.models[idx]
+        model_path = os.path.join(self.data_root, model['model_id'])
+        
+        if self.split == 'test': 
+            try : # for more rigorous evaluation on the test set, we use the 4096 points version downsampled with fps
+                pc_data = np.load(os.path.join(model_path, "pointcloud_4096.npz"))
+                points = pc_data["points"]
+                normals = pc_data["normals"]
+            except FileNotFoundError:
+                pc_data = np.load(os.path.join(model_path, "pointcloud.npz"))
+                n_points = pc_data["points"].shape[0]
+                idxs = np.random.choice(n_points, 4096, replace=False)
+                points = pc_data["points"][idxs]
+                normals = pc_data["normals"][idxs]
+            
+        else:
+            pc_data = np.load(os.path.join(model_path, "pointcloud.npz"))
+            n_points = pc_data["points"].shape[0]
+            idxs = np.random.choice(n_points, 4096, replace=False)
+            points = pc_data["points"][idxs]
+            normals = pc_data["normals"][idxs]
+
+        if self.normalize:
+            points, translation, scale  = normalize_points(points)
+        else:
+            translation = np.zeros(3)
+            scale = 1.0
+
+        if self.transform is not None:
+            t_data = self.transform(points=points, normals=normals)
+            points = t_data['points']
+            normals = t_data['normals']
+
+        return {
+            "points": torch.from_numpy(points),
+            "normals": torch.from_numpy(normals),
+            "translation": torch.from_numpy(translation),
+            "scale": scale,
+            "point_num": points.shape[0],
+            "model_id": model['model_id']
+        }
+
+    def name(self):
+        return 'ABO'

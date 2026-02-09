@@ -6,7 +6,7 @@ from omegaconf import DictConfig, OmegaConf
 from torch.utils.data import DataLoader
 from superdec.superdec import SuperDec
 from superdec.utils.predictions_handler import PredictionHandler
-from superdec.data.dataloader import ShapeNet, Scene, denormalize_outdict, denormalize_points
+from superdec.data.dataloader import ShapeNet, Scene, ABO, denormalize_outdict, denormalize_points
 from typing import Dict, Any
 from tqdm import tqdm
 
@@ -16,6 +16,10 @@ def main(cfg: DictConfig) -> None:
     # Dataloader
     if cfg.dataset == 'shapenet':
         dataset = ShapeNet(split=cfg.dataloader.split, cfg=cfg)
+        filename = f'{cfg.dataset}_{cfg.dataloader.split}.npz'
+        z_up = False
+    elif cfg.dataset == 'abo':
+        dataset = ABO(split=cfg.dataloader.split, cfg=cfg)
         filename = f'{cfg.dataset}_{cfg.dataloader.split}.npz'
         z_up = False
     elif cfg.dataset == 'scene':
