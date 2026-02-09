@@ -6,7 +6,7 @@ from superdec.utils.predictions_handler_extended import PredictionHandler
 
 def main():
     resolution = 30 
-    pred_path = "data/output_npz/objects/rect_table.npz"
+    pred_path = "data/output_npz/objects/round_table4.npz"
     
     # 1. Load Data
     pred_handler = PredictionHandler.from_npz(pred_path)
@@ -61,10 +61,10 @@ def main():
 
         gui_controls['k_z'] = server.gui.add_slider("Bend Z (k)", 0.0, 10.0, 0.01, 0.0)
         gui_controls['a_z'] = server.gui.add_slider("Bend Z (deg)", 0.0, 360.0, 5.0, 0.0)
-        gui_controls['k_x'] = server.gui.add_slider("Bend X (k)", 0.0, 10.0, 0.01, 0.0)
-        gui_controls['a_x'] = server.gui.add_slider("Bend X (deg)", 0.0, 360.0, 5.0, 0.0)
-        gui_controls['k_y'] = server.gui.add_slider("Bend Y (k)", 0.0, 10.0, 0.01, 0.0)
-        gui_controls['a_y'] = server.gui.add_slider("Bend Y (deg)", 0.0, 360.0, 5.0, 0.0)
+        # gui_controls['k_x'] = server.gui.add_slider("Bend X (k)", 0.0, 10.0, 0.01, 0.0)
+        # gui_controls['a_x'] = server.gui.add_slider("Bend X (deg)", 0.0, 360.0, 5.0, 0.0)
+        # gui_controls['k_y'] = server.gui.add_slider("Bend Y (k)", 0.0, 10.0, 0.01, 0.0)
+        # gui_controls['a_y'] = server.gui.add_slider("Bend Y (deg)", 0.0, 360.0, 5.0, 0.0)
 
     # 4. Functions
     def render_all():
@@ -112,10 +112,10 @@ def main():
         gui_controls['k2'].value = float(k[1])
         gui_controls['k_z'].value = float(b[0])
         gui_controls['a_z'].value = float(np.degrees(b[1]))
-        gui_controls['k_x'].value = float(b[2])
-        gui_controls['a_x'].value = float(np.degrees(b[3]))
-        gui_controls['k_y'].value = float(b[4])
-        gui_controls['a_y'].value = float(np.degrees(b[5]))
+        # gui_controls['k_x'].value = float(b[2])
+        # gui_controls['a_x'].value = float(np.degrees(b[3]))
+        # gui_controls['k_y'].value = float(b[4])
+        # gui_controls['a_y'].value = float(np.degrees(b[5]))
         
         is_loading = False # Re-enable sync
         render_all()
@@ -138,8 +138,8 @@ def main():
         pred_handler.tapering[B_IDX, p_idx] = [gui_controls['k1'].value, gui_controls['k2'].value]
         pred_handler.bending[B_IDX, p_idx] = [
             gui_controls['k_z'].value, np.radians(gui_controls['a_z'].value),
-            gui_controls['k_x'].value, np.radians(gui_controls['a_x'].value),
-            gui_controls['k_y'].value, np.radians(gui_controls['a_y'].value)
+            # gui_controls['k_x'].value, np.radians(gui_controls['a_x'].value),
+            # gui_controls['k_y'].value, np.radians(gui_controls['a_y'].value)
         ]
 
         render_all()
