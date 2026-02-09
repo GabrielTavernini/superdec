@@ -40,6 +40,7 @@ class BatchSuperQMulti(nn.Module):
         exp_list = []
         rot_list = []
         trans_list = []
+        assign_list = []
         self.masks = [] 
 
         self.points = torch.zeros(B, self.M_points, 3, device=device)
@@ -49,6 +50,8 @@ class BatchSuperQMulti(nn.Module):
             # --- Params ---
             mask = (pred_handler.exist[idx] > 0.5)
             self.masks.append(torch.tensor(mask, dtype=torch.bool, device=device).reshape(-1))
+            assign_mat = torch.tensor(pred_handler.assign_matrix, dtype=torch.bool, device=device)
+            assign_list.append(torch.log(assign_mat).transpose(-2, -1))
 
             s = torch.tensor(pred_handler.scale[idx], dtype=torch.float, device=device).reshape(-1, 3)
             e = torch.tensor(pred_handler.exponents[idx], dtype=torch.float, device=device).reshape(-1, 2)
@@ -138,7 +141,8 @@ class BatchSuperQMulti(nn.Module):
         self.translation = nn.Parameter(torch.stack(trans_list)) # (B, N, 3)
         self.raw_tapering = nn.Parameter(torch.full((B, self.N_max, 2), 1e-4, dtype=torch.float, device=device))
         
-        self.raw_assign_matrix = nn.Parameter(torch.ones((B, self.N_max, self.M_points), dtype=torch.float, device=device))
+        self.raw_assign_matrix = nn.Parameter(torch.cat(assign_list))
+        # self.raw_assign_matrix = nn.Parameter(torch.ones((B, self.N_max, self.M_points), dtype=torch.float, device=device))
 
         self.exist_mask = torch.stack(self.masks) # (B, N)
 
@@ -155,7 +159,8 @@ class BatchSuperQMulti(nn.Module):
         return torch.tanh(self.raw_tapering)
 
     def assign_matrix(self):
-        return F.softmax(self.raw_assign_matrix, dim=1)
+        mask = self.exist_mask.unsqueeze(-1)
+        return F.softmax((torch.exp(self.raw_assign_matrix) + 1e-2) * mask, dim=1)
 
     def get_param_groups(self):
         lrs = {
@@ -220,21 +225,25 @@ class BatchSuperQMulti(nn.Module):
         return sdf
 
     def compute_losses(self, forward_out, weight_pos: float = 2.0, weight_neg: float = 0.0):
+        sdf_mat = forward_out.get('sdf_mat')
         sdf_values = forward_out.get('sdf_values')
         outside_values = forward_out.get('outside_values')
         counts_points = forward_out.get('counts_points')
         counts_outside = forward_out.get('counts_outside')
-        
         device = sdf_values.device
         B = sdf_values.shape[0]
 
-        # SDF loss per point
-        pos_part = torch.clamp(sdf_values, min=0.0)
-        neg_part = torch.clamp(sdf_values, max=0.0)
+        # Per-primitive SDF loss per point: compute pos/neg parts per primitive
+        # sdf_mat: (B, N, M_points)
+        pos_part = torch.clamp(sdf_mat, min=0.0)
+        neg_part = torch.clamp(sdf_mat, max=0.0)
         Lsdf_b = weight_pos * pos_part + weight_neg * torch.abs(neg_part)
-        
-        # Simplified: Lsdf_b (B, M) -> mean over fixed M points
-        Lsdf = Lsdf_b.mean(dim=1)
+
+        # Weight per-point primitive losses by assignment matrix and compute weighted mean per primitive
+        # assign: (B, N, M_points)
+        weighted = Lsdf_b * self.assign_matrix()
+        Lsdf_prim = 10 * weighted.mean(dim=2)
+        Lsdf = Lsdf_prim.mean(dim=1)
 
         # Regularization term per primitive
         outside_ratio = counts_outside / (counts_points + counts_outside + 1e-6)
@@ -263,6 +272,7 @@ class BatchSuperQMulti(nn.Module):
         split_idx = self.points.shape[1]
         all_points = torch.cat([self.points, self.outside_points], dim=1) 
         all_sdfs = self.sdf_batch(all_points.transpose(1, 2)) # (B, N, M_total)
+        all_sdfs_mat = all_sdfs[:, :, :split_idx] 
         
         # Use a large finite number instead of inf to avoid NaN in 0 * inf during weighted sum
         large_val = 1e6
@@ -271,19 +281,9 @@ class BatchSuperQMulti(nn.Module):
         
         all_sdfs_clipped = torch.clip(all_sdfs, -self.truncation, self.truncation)
         all_sdfs_leaky = all_sdfs_clipped + 0.1 * (all_sdfs - all_sdfs_clipped)
-        
-        sdfs_points = all_sdfs[:, :, :split_idx] 
         leaky_points = all_sdfs_leaky[:, :, :split_idx]
-        
-        logits = self.raw_assign_matrix
-        # Ensure invalid primitives have 0 weight in softmax
-        mask_expanded_points = self.exist_mask.unsqueeze(-1).expand_as(logits)
-        logits = torch.where(mask_expanded_points, logits, torch.tensor(-float('inf'), device=logits.device))
-        weights = F.softmax(logits, dim=1) 
-        values_points = torch.sum(weights * leaky_points, dim=1) 
-        
-        # Simplified counting
-        idx_points = torch.argmin(sdfs_points, dim=1) 
+        values_points, idx_points = torch.min(leaky_points, dim=1) 
+
         counts_points = torch.zeros(all_sdfs.shape[0], all_sdfs.shape[1], device=all_sdfs.device)
         for b in range(all_sdfs.shape[0]):
             counts_points[b] = torch.bincount(idx_points[b], minlength=self.N_max).float()
@@ -300,6 +300,7 @@ class BatchSuperQMulti(nn.Module):
                 counts_outside[b] = torch.bincount(idx_out[neg_mask], minlength=self.N_max).float()
                      
         return {
+            'sdf_mat': all_sdfs_mat,
             'sdf_values': values_points,
             'outside_values': values_outside,
             'counts_points': counts_points,
