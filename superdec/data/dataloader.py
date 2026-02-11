@@ -183,9 +183,104 @@ class Scene(Dataset):
     def name(self):
         return 'Scene'
 
-class ShapeNet(Dataset):
+
+class ObjectDataset(Dataset):
+    """Shared helpers for ShapeNet/ABO pointcloud-style datasets."""
     def __init__(self, split: str, cfg):
-        super().__init__()
+        self.gt_params_path = None
+        self.gt_data, self.gt_mapping = {}, {}
+        self.load_occupancy = False
+        if split == 'train' or split =='val':
+            if cfg.loss.type == 'iou':
+                self.load_occupancy = True
+            elif cfg.loss.type == 'param':
+                self.gt_params_path = cfg.loss.gt_train_path if split == 'train' else cfg.loss.gt_val_path
+                self._load_gt_params()
+    
+    def _load_gt_params(self):
+        if not os.path.exists(self.gt_params_path):
+            print(f"Warning: GT params path {self.gt_params_path} not found.")
+            return
+        try:
+            data = np.load(self.gt_params_path, allow_pickle=True)
+            self.gt_data = {k: data[k] for k in data.files}
+            names = self.gt_data['names']
+            if names.ndim == 0: names = names.item()
+            self.gt_mapping = {str(n): i for i, n in enumerate(names)}
+            print(f"Loaded GT params from {self.gt_params_path} for {len(names)} models.")
+        except Exception as e:
+            print(f"Error loading GT params: {e}")
+            self.gt_data = None
+
+    def _load_pointcloud(self, model_path):
+        # Load pointcloud and normals, prefer precomputed 4096 file on test
+        if self.split == 'test':
+            try:
+                pc_data = np.load(os.path.join(model_path, "pointcloud_4096.npz"))
+                points = pc_data["points"]
+                normals = pc_data["normals"]
+                return points, normals
+            except FileNotFoundError:
+                pass
+
+        pc_data = np.load(os.path.join(model_path, "pointcloud.npz"))
+        n_points = pc_data["points"].shape[0]
+        if self.split == 'test' or n_points >= 4096:
+            idxs = np.random.choice(n_points, 4096, replace=False)
+        else:
+            idxs = np.random.choice(n_points, 4096)
+        points = pc_data["points"][idxs]
+        normals = pc_data["normals"][idxs]
+        return points, normals
+
+    def _add_occupancy_and_gt(self, res, model_id, model_path):
+        # occupancy / points_iou
+        if self.load_occupancy:
+            try:
+                points_iou_path = os.path.join(model_path, "points.npz")
+                points_dict = np.load(points_iou_path)
+                points_iou = points_dict['points']
+                occ_tgt = points_dict['occupancies']
+                if np.issubdtype(occ_tgt.dtype, np.uint8):
+                    occ_tgt = np.unpackbits(occ_tgt)[:points_iou.shape[0]]
+
+                if self.normalize:
+                    translation_np = res['translation'].numpy() if isinstance(res['translation'], torch.Tensor) else res['translation']
+                    scale_iou = res['scale']
+                    points_iou = (points_iou - translation_np) / scale_iou
+
+                res.update({
+                    'points_iou': torch.from_numpy(points_iou).float(),
+                    'occupancies': torch.from_numpy(occ_tgt).bool()
+                })
+            except Exception:
+                pass
+
+        # GT params
+        if str(model_id) in self.gt_mapping:
+            idx = self.gt_mapping[str(model_id)]
+            gt_scale = self.gt_data['scale'][idx]
+            gt_shape = self.gt_data['exponents'][idx]
+            gt_trans = self.gt_data['translation'][idx]
+            gt_rotate = self.gt_data['rotation'][idx]
+            gt_exist = self.gt_data['exist'][idx]
+
+            translation_np = res['translation'].numpy() if isinstance(res['translation'], torch.Tensor) else res['translation']
+            gt_trans = (gt_trans - translation_np) / res['scale']
+            gt_scale = gt_scale / res['scale']
+
+            res.update({
+                'gt_scale': torch.from_numpy(gt_scale).float(),
+                'gt_shape': torch.from_numpy(gt_shape).float(),
+                'gt_trans': torch.from_numpy(gt_trans).float(),
+                'gt_rotate': torch.from_numpy(gt_rotate).float(),
+                'gt_exist': torch.from_numpy(gt_exist).float()
+            })
+
+
+class ShapeNet(ObjectDataset):
+    def __init__(self, split: str, cfg):
+        super().__init__(split, cfg)
         self.split = split
         self.data_root = cfg.shapenet.path
 
@@ -220,26 +315,8 @@ class ShapeNet(Dataset):
     def __getitem__(self, idx):
         model = self.models[idx]
         model_path = os.path.join(self.data_root, model['category'], model['model_id'])
-        
 
-        if self.split == 'test': 
-            try : # for more rigorous evaluation on the test set, we use the 4096 points version downsampled with fps
-                pc_data = np.load(os.path.join(model_path, "pointcloud_4096.npz"))
-                points = pc_data["points"]
-                normals = pc_data["normals"]
-            except FileNotFoundError:
-                pc_data = np.load(os.path.join(model_path, "pointcloud.npz"))
-                n_points = pc_data["points"].shape[0]
-                idxs = np.random.choice(n_points, 4096, replace=False)
-                points = pc_data["points"][idxs]
-                normals = pc_data["normals"][idxs]
-            
-        else:
-            pc_data = np.load(os.path.join(model_path, "pointcloud.npz"))
-            n_points = pc_data["points"].shape[0]
-            idxs = np.random.choice(n_points, 4096, replace=False)
-            points = pc_data["points"][idxs]
-            normals = pc_data["normals"][idxs]
+        points, normals = self._load_pointcloud(model_path)
 
         if self.normalize:
             points, translation, scale  = normalize_points(points)
@@ -252,7 +329,7 @@ class ShapeNet(Dataset):
             points = t_data['points']
             normals = t_data['normals']
 
-        return {
+        res = {
             "points": torch.from_numpy(points),
             "normals": torch.from_numpy(normals),
             "translation": torch.from_numpy(translation),
@@ -261,17 +338,20 @@ class ShapeNet(Dataset):
             "model_id": model['model_id']
         }
 
+        self._add_occupancy_and_gt(res, model['model_id'], model_path)
+        return res
+
     def name(self):
         return 'ShapeNet'
 
-class ABO(Dataset):
+class ABO(ObjectDataset):
     def __init__(self, split: str, cfg):
-        super().__init__()
+        super().__init__(split, cfg)
         self.split = split
         self.data_root = cfg.abo.path
 
         self.transform = get_transforms(split, cfg)
-        self.normalize = cfg.abo.normalize if 'normalize' in cfg.abo else True
+        self.normalize = cfg.abo.normalize
 
         self.models = self._gather_models()
 
@@ -282,7 +362,6 @@ class ABO(Dataset):
         
         # List all subdirectories (ASINs)
         models = [d for d in os.listdir(self.data_root) if os.path.isdir(os.path.join(self.data_root, d))]
-        # models = [d for d in models if len(os.listdir(os.path.join(self.data_root, d))) > 0]
         models.sort() # Ensure deterministic order
         
         # Simple deterministic split: 80% train, 10% val, 10% test
@@ -307,25 +386,8 @@ class ABO(Dataset):
     def __getitem__(self, idx):
         model = self.models[idx]
         model_path = os.path.join(self.data_root, model['model_id'])
-        
-        if self.split == 'test': 
-            try : # for more rigorous evaluation on the test set, we use the 4096 points version downsampled with fps
-                pc_data = np.load(os.path.join(model_path, "pointcloud_4096.npz"))
-                points = pc_data["points"]
-                normals = pc_data["normals"]
-            except FileNotFoundError:
-                pc_data = np.load(os.path.join(model_path, "pointcloud.npz"))
-                n_points = pc_data["points"].shape[0]
-                idxs = np.random.choice(n_points, 4096, replace=False)
-                points = pc_data["points"][idxs]
-                normals = pc_data["normals"][idxs]
-            
-        else:
-            pc_data = np.load(os.path.join(model_path, "pointcloud.npz"))
-            n_points = pc_data["points"].shape[0]
-            idxs = np.random.choice(n_points, 4096, replace=False)
-            points = pc_data["points"][idxs]
-            normals = pc_data["normals"][idxs]
+
+        points, normals = self._load_pointcloud(model_path)
 
         if self.normalize:
             points, translation, scale  = normalize_points(points)
@@ -338,7 +400,7 @@ class ABO(Dataset):
             points = t_data['points']
             normals = t_data['normals']
 
-        return {
+        res = {
             "points": torch.from_numpy(points),
             "normals": torch.from_numpy(normals),
             "translation": torch.from_numpy(translation),
@@ -346,6 +408,9 @@ class ABO(Dataset):
             "point_num": points.shape[0],
             "model_id": model['model_id']
         }
+
+        self._add_occupancy_and_gt(res, model['model_id'], model_path)
+        return res
 
     def name(self):
         return 'ABO'

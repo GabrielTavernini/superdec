@@ -65,9 +65,8 @@ class Trainer:
         }
 
         for batch in pbar:
-            pc, normals = batch['points'].cuda().float(), batch['normals'].cuda().float()
-            outdict = self.model(pc)
-            loss, loss_dict = self.loss_fn(pc, normals, outdict)
+            outdict = self.model(batch['points'].cuda().float())
+            loss, loss_dict = self.loss_fn(batch, outdict)
 
             total_loss += loss.item()
             total_batches += 1
@@ -96,9 +95,8 @@ class Trainer:
         avg_loss_dict = {}
 
         for batch in pbar:
-            pc, normals = batch['points'].cuda().float(), batch['normals'].cuda().float()
-            outdict = self.model(pc)
-            loss, loss_dict = self.loss_fn(pc, normals, outdict)
+            outdict = self.model(batch['points'].cuda().float())
+            loss, loss_dict = self.loss_fn(batch, outdict)
 
             # Backward pass
             self.optimizer.zero_grad()

@@ -13,10 +13,10 @@ RESOLUTION = 30
 
 def main(cfg: DictConfig) -> None:
   server = viser.ViserServer()
-  if cfg.dataset not in ['shapenet', 'scene']:
+  if cfg.dataset not in ['shapenet', 'abo', 'scene']:
     raise NotImplementedError(f"Dataset {cfg.dataset} not implemented for visualization yet.")
 
-  if cfg.dataset == 'shapenet':
+  if cfg.dataset == 'shapenet' or cfg.dataset == 'abo':
     input_path = os.path.join(cfg.npz_folder, f'{cfg.dataset}_{cfg.split}.npz')
   elif cfg.dataset == 'scene':
     input_path = os.path.join(cfg.npz_folder, f'{cfg.split}.npz')
@@ -49,7 +49,7 @@ def main(cfg: DictConfig) -> None:
             point_size=0.005,
             visible = False
         )
-  elif cfg.dataset == 'shapenet': # visualization for objects
+  elif cfg.dataset == 'shapenet' or cfg.dataset == 'abo': # visualization for objects
     def draw_superquadric_and_segmentation():
       idx = int(gui_model_selection.value)
       server.scene.add_mesh_trimesh("superquadrics", mesh=meshes[idx], visible=True)

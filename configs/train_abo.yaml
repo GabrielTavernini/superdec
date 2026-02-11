@@ -8,7 +8,7 @@ dataset: abo
 device: cuda
 
 checkpoints:
-  resume_from: #
+  resume_from: checkpoints/shapenet/ckpt.pt
   keep_epoch: False
 
 superdec:
@@ -80,11 +80,25 @@ scheduler:
   steps_per_epoch: -1
 
 loss:
+  type: original
+  
+  # Original
   n_samples: 500
   w_sps: 0.1 #0.6 
   w_ext: 0.01 #0.01 
   w_cub: 1.0 #1.0 
   w_cd: 1.0
+  
+  # Param
+  w_param: 1.0
+  gt_train_path: null
+  gt_val_path: null
+  
+  # IoU
+  truncation: 0.05
+  w_sdf: 1.0
+  w_bbox: 1.0
+  w_iou: 1.0
   
 visualization:
   res_primitives: 40
