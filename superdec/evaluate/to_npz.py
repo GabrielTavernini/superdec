@@ -5,7 +5,7 @@ import hydra
 from omegaconf import DictConfig, OmegaConf
 from torch.utils.data import DataLoader
 from superdec.superdec import SuperDec
-from superdec.utils.predictions_handler import PredictionHandler
+from superdec.utils.predictions_handler_extended import PredictionHandler
 from superdec.data.dataloader import ShapeNet, Scene, ABO, denormalize_outdict, denormalize_points
 from typing import Dict, Any
 from tqdm import tqdm
@@ -52,6 +52,8 @@ def main(cfg: DictConfig) -> None:
             outdict = denormalize_outdict(outdict, b['translation'], b['scale'], z_up)
             points = denormalize_points(points, b['translation'], b['scale'], z_up)
             names = b.get('model_id', np.arange(points.shape[0]))
+            if cfg.dataset == 'abo': 
+                outdict['rescale'] = b.get('rescale', np.arange(points.shape[0]))
             if i == 0:
                 pred_handler = PredictionHandler.from_outdict(outdict, points, names)
             else:

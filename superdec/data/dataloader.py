@@ -219,7 +219,7 @@ class ObjectDataset(Dataset):
                 pc_data = np.load(os.path.join(model_path, "pointcloud_4096.npz"))
                 points = pc_data["points"]
                 normals = pc_data["normals"]
-                return points, normals
+                return points, normals, pc_data
             except Exception:
                 print(f"Error loading precomputed 4096 file for {model_path}")
                 pass
@@ -232,7 +232,7 @@ class ObjectDataset(Dataset):
             idxs = np.random.choice(n_points, 4096)
         points = pc_data["points"][idxs]
         normals = pc_data["normals"][idxs]
-        return points, normals
+        return points, normals, pc_data
 
     def _add_occupancy_and_gt(self, res, model_id, model_path):
         # occupancy / points_iou
@@ -317,7 +317,7 @@ class ShapeNet(ObjectDataset):
         model = self.models[idx]
         model_path = os.path.join(self.data_root, model['category'], model['model_id'])
 
-        points, normals = self._load_pointcloud(model_path)
+        points, normals, _ = self._load_pointcloud(model_path)
 
         if self.normalize:
             points, translation, scale  = normalize_points(points)
@@ -393,7 +393,8 @@ class ABO(ObjectDataset):
         model_path = os.path.join(self.data_root, model['model_id'])
         
         # TODO: use furthest point downsample for now (best results)
-        points, normals = self._load_pointcloud(model_path, use_precomputed=True)
+        points, normals, pc_data = self._load_pointcloud(model_path, use_precomputed=True)
+        rescale = pc_data["scale"]
 
         if self.normalize:
             points, translation, scale  = normalize_points(points)
@@ -407,6 +408,7 @@ class ABO(ObjectDataset):
             normals = t_data['normals']
 
         res = {
+            "rescale": torch.from_numpy(rescale),
             "points": torch.from_numpy(points),
             "normals": torch.from_numpy(normals),
             "translation": torch.from_numpy(translation),

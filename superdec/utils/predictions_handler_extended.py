@@ -7,6 +7,19 @@ import open3d as o3d
 from superdec.utils.visualizations import generate_ncolors
 from superdec.utils.transforms import transform_to_primitive_frame
 
+def extend_dict(outdict):
+    if isinstance(outdict['scale'], torch.Tensor): cls = torch
+    else: cls = np
+    
+    B, N, _ = outdict['scale'].shape
+    if 'rescale' not in outdict:
+        outdict['rescale'] = cls.ones((B))
+    if 'tapering' not in outdict: 
+        outdict['tapering'] = cls.zeros((B, N, 2))
+    if 'bending' not in outdict: 
+        outdict['bending'] = cls.zeros((B, N, 2))
+    return outdict
+
 class PredictionHandler:
     def __init__(self, predictions: Dict[str, np.ndarray]):
         self.names = predictions['names']
@@ -20,15 +33,9 @@ class PredictionHandler:
         self.colors = generate_ncolors(self.translation.shape[1])  # Generate colors for each object
 
         # extension
-        if 'tapering' in predictions:
-            self.tapering = predictions['tapering']
-        else:
-            self.tapering = np.zeros_like(self.exponents)
-            
-        if 'bending' in predictions:
-            self.bending = predictions['bending']
-        else:
-            self.bending = np.zeros_like(self.exponents)
+        self.tapering = predictions['tapering']
+        self.bending = predictions['bending']
+        self.rescale = predictions['rescale']
     
     def save_npz(self, filepath):
         """Save accumulated outputs to compressed npz file."""
@@ -44,15 +51,18 @@ class PredictionHandler:
             exist=np.stack(self.exist),
             tapering=np.stack(self.tapering),
             bending=np.stack(self.bending),
+            rescale=np.stack(self.rescale),
         )
     
     @classmethod
     def from_npz(cls, path: str):
         data = np.load(path, allow_pickle=True)
-        return cls({key: data[key] for key in data.files})
-    
+        data_dict = {key: data[key] for key in data.files}
+        return cls(extend_dict(data_dict))
+
     @classmethod # TODO test!!
     def from_outdict(cls, outdict, pcs, names):
+        extend_dict(outdict)
         predictions = {
             'names': names, 
             'pc': pcs.cpu().numpy(), 
@@ -63,11 +73,13 @@ class PredictionHandler:
             'exponents': outdict['shape'].cpu().numpy(), 
             'exist': outdict['exist'].cpu().numpy(),
             'tapering': outdict['tapering'].cpu().numpy(),
-            'bending': outdict['bending'].cpu().numpy()
+            'bending': outdict['bending'].cpu().numpy(),
+            'rescale': outdict['rescale'].cpu().numpy(), 
         }
         return cls(predictions)
 
     def append_outdict(self, outdict, pcs, names):
+        extend_dict(outdict)
         self.names = np.concatenate((self.names, names), axis=0)
         self.pc = np.concatenate((self.pc, pcs.cpu().numpy()), axis=0)
         self.assign_matrix = np.concatenate((self.assign_matrix, outdict['assign_matrix'].cpu().numpy()), axis=0)
@@ -78,6 +90,7 @@ class PredictionHandler:
         self.exist = np.concatenate((self.exist, outdict['exist'].cpu().numpy()), axis=0)
         self.tapering = np.concatenate((self.tapering, outdict['tapering'].cpu().numpy()), axis=0)
         self.bending = np.concatenate((self.bending, outdict['bending'].cpu().numpy()), axis=0)
+        self.rescale = np.concatenate((self.rescale, outdict['rescale'].cpu().numpy()), axis=0)
 
     def get_segmented_pc(self, index):
         if isinstance(self.assign_matrix, torch.Tensor):

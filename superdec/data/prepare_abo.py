@@ -48,9 +48,8 @@ def process_file(args):
         # Scale
         # Fit to unit cube [-0.5, 0.5] (size 1.0)
         max_extent = np.max(mesh.extents)
-        if max_extent > 0:
-            scale = 1.0 / max_extent
-            mesh.apply_scale(scale)
+        scale = 1.0 / max_extent
+        mesh.apply_scale(scale)
 
         # 1. Surface points
         points_surface, face_indices = trimesh.sample.sample_surface(mesh, n_points_surf)
@@ -76,9 +75,9 @@ def process_file(args):
         
         # Save to files
         os.makedirs(output_dir, exist_ok=True)
-        np.savez_compressed(pc_path, points=points_surface.astype(np.float32), normals=normals_surface.astype(np.float32))
-        np.savez_compressed(points_path, points=points_vol.astype(np.float32), occupancies=packed_occ)
-        np.savez_compressed(path_4096, points=points_4096.astype(np.float32), normals=normals_4096.astype(np.float32))
+        np.savez_compressed(pc_path, points=points_surface.astype(np.float32), normals=normals_surface.astype(np.float32), scale=np.float32(scale))
+        np.savez_compressed(points_path, points=points_vol.astype(np.float32), occupancies=packed_occ, scale=np.float32(scale))
+        np.savez_compressed(path_4096, points=points_4096.astype(np.float32), normals=normals_4096.astype(np.float32), scale=np.float32(scale))
         
     except Exception as e:
         print(f"Error processing {input_file}: {e}")
