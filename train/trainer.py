@@ -143,7 +143,8 @@ class Trainer:
             # Evaluation phase (every epoch in the main process)
             if is_main_process():
                 val_metrics = self.evaluate(epoch)
-                val_loss = val_metrics.get('loss', None) or list(val_metrics.values())[0]
+                val_loss = val_metrics.get('loss', None) or list(val_metrics.values())
+                val_loss = val_loss[0] if val_loss else 0.0
 
                 do_save = ((epoch + 1) % save_every == 0) or (epoch == self.num_epochs - 1)
                 if do_save: 

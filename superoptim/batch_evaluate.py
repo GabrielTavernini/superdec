@@ -14,20 +14,23 @@ from .evaluation import get_outdict, eval_mesh
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--type", type=str, default="empty", help="Type of superq module (empty, segmented, etc.)")
+    parser.add_argument("--prefix", type=str, default="shapenet_test", help="Npz file prefix")
     args = parser.parse_args()
 
     try:
         # Import dynamically based on type
         module_name = f"superoptim.{args.type}.batch_superq"
+        if args.type == "none":
+            module_name = f"superoptim.iou.batch_superq"
         module = importlib.import_module(module_name)
         BatchSuperQMulti = module.BatchSuperQMulti
     except ImportError:
         print(f"Error importing BatchSuperQMulti for type '{args.type}': {e}")
         return
 
-    print(f"Evaluating {args.type}...")
-    input_npz = "data/output_npz/shapenet_test.npz"
-    output_npz = f"data/output_npz/shapenet_test_tables_optimized_{args.type}.npz"
+    print(f"Evaluating {args.type} on {args.prefix}...")
+    input_npz = f"data/output_npz/{args.prefix}.npz"
+    output_npz = f"data/output_npz/{args.prefix}_optimized_{args.type}.npz"
 
     # server = viser.ViserServer()
     # server.scene.set_up_direction([0.0, 1.0, 0.0])
@@ -41,17 +44,20 @@ def main():
     pred_handler = PredictionHandler.from_npz(input_npz)
     
     # Filter for category 04379243
-    valid_indices = []
-    category_path = "data/ShapeNet/04379243"
-    for i, name in enumerate(pred_handler.names):
-        if os.path.exists(os.path.join(category_path, name)):
-            valid_indices.append(i)
+    valid_objs = []
+    data_root = "data/ShapeNet"
+    for c in os.listdir(data_root):
+        category_path = os.path.join(data_root, c)
+        for i, name in enumerate(pred_handler.names):
+            if os.path.exists(os.path.join(category_path, name)):
+                valid_objs.append((i, category_path))
 
-    # valid_indices = valid_indices[:32] # Limit to 32 objects for testing
-    print(f"Loaded {len(valid_indices)} objects from category 04379243 out of {pred_handler.scale.shape[0]}.")
+    # valid_objs = valid_objs[:32] # Limit to 32 objects for testing
+    print(f"Loaded {len(valid_objs)} objects from all categories out of {pred_handler.scale.shape[0]}.")
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
     num_epochs = 1_000
+    if args.type == "none": num_epochs = 0
     
     # Store aggregated metrics
     aggregated_metrics = {
@@ -69,11 +75,12 @@ def main():
     object_metrics = [] # List of tuples: (index, name, chamfer_l1)
     batch_size = 128
     
-    for i in tqdm(range(0, len(valid_indices), batch_size), desc="Processing batches"):
-        batch_indices = valid_indices[i : i + batch_size]
+    for i in tqdm(range(0, len(valid_objs), batch_size), desc="Processing batches"):
+        batch_objs = valid_objs[i : i + batch_size]
+        batch_indices = [x[0] for x in batch_objs]
         # print(f"Processing batch {i//batch_size + 1}, indices: {batch_indices}")
         
-        ply_paths = [f"{category_path}/{pred_handler.names[idx]}/pointcloud.npz" for idx in batch_indices]
+        ply_paths = [f"{category_path}/{pred_handler.names[idx]}/pointcloud.npz" for idx, category_path in batch_objs]
         
         superq = BatchSuperQMulti(
             pred_handler=pred_handler,

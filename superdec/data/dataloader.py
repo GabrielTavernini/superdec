@@ -190,7 +190,7 @@ class ObjectDataset(Dataset):
         self.gt_params_path = None
         self.gt_data, self.gt_mapping = {}, {}
         self.load_occupancy = False
-        if split == 'train' or split =='val':
+        if hasattr(cfg, 'loss') and (split == 'train' or split =='val'):
             if cfg.loss.type == 'iou':
                 self.load_occupancy = True
             elif cfg.loss.type == 'param':
@@ -212,15 +212,16 @@ class ObjectDataset(Dataset):
             print(f"Error loading GT params: {e}")
             self.gt_data = None
 
-    def _load_pointcloud(self, model_path):
+    def _load_pointcloud(self, model_path, use_precomputed=False):
         # Load pointcloud and normals, prefer precomputed 4096 file on test
-        if self.split == 'test':
+        if self.split == 'test' or use_precomputed:
             try:
                 pc_data = np.load(os.path.join(model_path, "pointcloud_4096.npz"))
                 points = pc_data["points"]
                 normals = pc_data["normals"]
                 return points, normals
-            except FileNotFoundError:
+            except Exception:
+                print(f"Error loading precomputed 4096 file for {model_path}")
                 pass
 
         pc_data = np.load(os.path.join(model_path, "pointcloud.npz"))
@@ -366,8 +367,12 @@ class ABO(ObjectDataset):
         
         # Simple deterministic split: 80% train, 10% val, 10% test
         n_models = len(models)
-        n_train = int(n_models * 0.8)
-        n_val = int(n_models * 0.9)
+        # n_train = int(n_models * 0.8)
+        # n_val = int(n_models * 0.9)
+        
+        # TODO: no validation or test at the moment
+        n_train = int(n_models * 1)
+        n_val = int(n_models * 1) 
         
         if self.split == 'train':
             models = models[:n_train]
@@ -386,8 +391,9 @@ class ABO(ObjectDataset):
     def __getitem__(self, idx):
         model = self.models[idx]
         model_path = os.path.join(self.data_root, model['model_id'])
-
-        points, normals = self._load_pointcloud(model_path)
+        
+        # TODO: use furthest point downsample for now (best results)
+        points, normals = self._load_pointcloud(model_path, use_precomputed=True)
 
         if self.normalize:
             points, translation, scale  = normalize_points(points)

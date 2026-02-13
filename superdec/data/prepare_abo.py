@@ -85,9 +85,9 @@ def process_file(args):
 
 def main():
     parser = argparse.ArgumentParser(description="Process ABO dataset.")
-    parser.add_argument("--input_dir", type=str, default="data/ABO/raw/3dmodels/original", help="Path to input GLB files")
-    parser.add_argument("--output_dir", type=str, default="data/ABO/processed", help="Path to output directory")
-    parser.add_argument("--num_workers", type=int, default=1, help="Number of worker processes")
+    parser.add_argument("--input_dir", type=str, default="data/ABO/raw-complete/3dmodels/original", help="Path to input GLB files")
+    parser.add_argument("--output_dir", type=str, default="data/ABO/processed-complete", help="Path to output directory")
+    parser.add_argument("--num_workers", type=int, default=8, help="Number of worker processes")
     parser.add_argument("--n_surf", type=int, default=100000, help="Number of surface points")
     parser.add_argument("--n_vol", type=int, default=100000, help="Number of volume points")
     

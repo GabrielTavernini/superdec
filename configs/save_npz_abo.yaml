@@ -1,4 +1,4 @@
-# checkpoints_folder: checkpoints/superdec_base
+# checkpoints_folder: checkpoints/abo
 checkpoints_folder: checkpoints/shapenet
 checkpoint_file: ckpt.pt
 output_dir: data/output_npz
@@ -6,11 +6,11 @@ config_file: config.yaml
 device: "cuda"
 dataset: abo
 dataloader:
-  split: test
+  split: train
   batch_size: 128
   num_workers: 4
 abo:
-  path: "data/ABO/processed"
+  path: "data/ABO/processed-complete"
   normalize: false
   categories: null
 evaluation:

@@ -3,7 +3,7 @@ use_wandb: false
 wandb:
   project: #insert PROJECT NAME
   entity: #insert USERNAME
-run_name: superdec_base
+run_name: abo
 dataset: abo  
 device: cuda
 
@@ -55,7 +55,7 @@ superdec:
         eps: 0  
 
 abo:
-  path: data/ABO/processed
+  path: data/ABO/processed-complete
   normalize: False
 
 trainer:
