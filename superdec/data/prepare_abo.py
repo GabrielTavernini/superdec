@@ -75,9 +75,9 @@ def process_file(args):
         
         # Save to files
         os.makedirs(output_dir, exist_ok=True)
-        np.savez_compressed(pc_path, points=points_surface.astype(np.float32), normals=normals_surface.astype(np.float32), scale=np.float32(scale))
-        np.savez_compressed(points_path, points=points_vol.astype(np.float32), occupancies=packed_occ, scale=np.float32(scale))
-        np.savez_compressed(path_4096, points=points_4096.astype(np.float32), normals=normals_4096.astype(np.float32), scale=np.float32(scale))
+        np.savez_compressed(pc_path, points=points_surface.astype(np.float32), normals=normals_surface.astype(np.float32), scale=np.float32(scale), center=np.float32(center))
+        np.savez_compressed(points_path, points=points_vol.astype(np.float32), occupancies=packed_occ, scale=np.float32(scale), center=np.float32(center))
+        np.savez_compressed(path_4096, points=points_4096.astype(np.float32), normals=normals_4096.astype(np.float32), scale=np.float32(scale), center=np.float32(center))
         
     except Exception as e:
         print(f"Error processing {input_file}: {e}")
@@ -86,7 +86,7 @@ def main():
     parser = argparse.ArgumentParser(description="Process ABO dataset.")
     parser.add_argument("--input_dir", type=str, default="data/ABO/raw-complete/3dmodels/original", help="Path to input GLB files")
     parser.add_argument("--output_dir", type=str, default="data/ABO/processed-complete", help="Path to output directory")
-    parser.add_argument("--num_workers", type=int, default=8, help="Number of worker processes")
+    parser.add_argument("--num_workers", type=int, default=64, help="Number of worker processes")
     parser.add_argument("--n_surf", type=int, default=100000, help="Number of surface points")
     parser.add_argument("--n_vol", type=int, default=100000, help="Number of volume points")
     
@@ -110,7 +110,7 @@ def main():
     
     tasks = [(f, output_dir, args.n_surf, args.n_vol) for f in files]
     
-    with multiprocessing.Pool(args.num_workers) as pool:
+    with multiprocessing.Pool(args.num_workers, maxtasksperchild=100) as pool:
         list(tqdm(pool.imap_unordered(process_file, tasks), total=len(tasks)))
 
 if __name__ == "__main__":

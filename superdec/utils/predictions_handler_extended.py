@@ -14,6 +14,8 @@ def extend_dict(outdict):
     B, N, _ = outdict['scale'].shape
     if 'rescale' not in outdict:
         outdict['rescale'] = cls.ones((B))
+    if 'recenter' not in outdict:
+        outdict['recenter'] = cls.zeros((B, 3))
     if 'tapering' not in outdict: 
         outdict['tapering'] = cls.zeros((B, N, 2))
     if 'bending' not in outdict: 
@@ -36,6 +38,7 @@ class PredictionHandler:
         self.tapering = predictions['tapering']
         self.bending = predictions['bending']
         self.rescale = predictions['rescale']
+        self.recenter = predictions['recenter']
     
     def save_npz(self, filepath):
         """Save accumulated outputs to compressed npz file."""
@@ -52,6 +55,7 @@ class PredictionHandler:
             tapering=np.stack(self.tapering),
             bending=np.stack(self.bending),
             rescale=np.stack(self.rescale),
+            recenter=np.stack(self.recenter),
         )
     
     @classmethod
@@ -75,6 +79,7 @@ class PredictionHandler:
             'tapering': outdict['tapering'].cpu().numpy(),
             'bending': outdict['bending'].cpu().numpy(),
             'rescale': outdict['rescale'].cpu().numpy(), 
+            'recenter': outdict['recenter'].cpu().numpy(), 
         }
         return cls(predictions)
 
@@ -91,6 +96,7 @@ class PredictionHandler:
         self.tapering = np.concatenate((self.tapering, outdict['tapering'].cpu().numpy()), axis=0)
         self.bending = np.concatenate((self.bending, outdict['bending'].cpu().numpy()), axis=0)
         self.rescale = np.concatenate((self.rescale, outdict['rescale'].cpu().numpy()), axis=0)
+        self.recenter = np.concatenate((self.recenter, outdict['recenter'].cpu().numpy()), axis=0)
 
     def get_segmented_pc(self, index):
         if isinstance(self.assign_matrix, torch.Tensor):

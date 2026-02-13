@@ -53,7 +53,8 @@ def main(cfg: DictConfig) -> None:
             points = denormalize_points(points, b['translation'], b['scale'], z_up)
             names = b.get('model_id', np.arange(points.shape[0]))
             if cfg.dataset == 'abo': 
-                outdict['rescale'] = b.get('rescale', np.arange(points.shape[0]))
+                outdict['recenter'] = b['recenter']
+                outdict['rescale'] = b['rescale']
             if i == 0:
                 pred_handler = PredictionHandler.from_outdict(outdict, points, names)
             else:

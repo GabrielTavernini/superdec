@@ -395,6 +395,7 @@ class ABO(ObjectDataset):
         # TODO: use furthest point downsample for now (best results)
         points, normals, pc_data = self._load_pointcloud(model_path, use_precomputed=True)
         rescale = pc_data["scale"]
+        recenter = pc_data["center"]
 
         if self.normalize:
             points, translation, scale  = normalize_points(points)
@@ -408,6 +409,7 @@ class ABO(ObjectDataset):
             normals = t_data['normals']
 
         res = {
+            "recenter": torch.from_numpy(recenter),
             "rescale": torch.from_numpy(rescale),
             "points": torch.from_numpy(points),
             "normals": torch.from_numpy(normals),
