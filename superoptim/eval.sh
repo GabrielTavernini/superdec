@@ -11,4 +11,5 @@
 # Default type if not provided
 TYPE=${1:-empty}
 
-python -m superoptim.batch_evaluate --type "$TYPE"
+# python -m superoptim.batch_evaluate --type "$TYPE"
+python -m superoptim.batch_evaluate --type "$TYPE" --prefix abo_train

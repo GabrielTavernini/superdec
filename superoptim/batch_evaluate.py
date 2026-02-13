@@ -43,14 +43,21 @@ def main():
     print(f"Loading {input_npz}...")
     pred_handler = PredictionHandler.from_npz(input_npz)
     
-    # Filter for category 04379243
     valid_objs = []
-    data_root = "data/ShapeNet"
-    for c in os.listdir(data_root):
-        category_path = os.path.join(data_root, c)
-        for i, name in enumerate(pred_handler.names):
-            if os.path.exists(os.path.join(category_path, name)):
-                valid_objs.append((i, category_path))
+    if "shapenet" in args.prefix:
+        data_root = "data/ShapeNet"
+        for c in os.listdir(data_root):
+            category_path = os.path.join(data_root, c)
+            for i, name in enumerate(pred_handler.names):
+                if os.path.exists(os.path.join(category_path, name)):
+                    valid_objs.append((i, category_path))
+    elif "abo" in args.prefix:
+        data_root = "data/ABO/processed-complete"
+        for i in range(len(pred_handler.names)):
+            valid_objs.append((i, data_root))
+    else:
+        print("Cannot locate ground truth data")
+        exit()
 
     # valid_objs = valid_objs[:32] # Limit to 32 objects for testing
     print(f"Loaded {len(valid_objs)} objects from all categories out of {pred_handler.scale.shape[0]}.")
@@ -138,6 +145,36 @@ def main():
                        superq.raw_tapering[b].copy_(best_params[b]["raw_tapering"])
                        superq.translation[b].copy_(best_params[b]["translation"])
 
+        # Compute IoU using SDF
+        # Load points.npz
+        points_iou_list = []
+        occ_tgt_list = []
+        for idx_in_batch, (idx, category_path) in enumerate(batch_objs):
+            obj_name = pred_handler.names[idx]
+            points_file = os.path.join(category_path, obj_name, "points.npz")
+            
+            points_dict = np.load(points_file)
+            pts = points_dict['points']
+            occ = points_dict['occupancies']
+            if np.issubdtype(occ.dtype, np.uint8):
+                occ = np.unpackbits(occ)[:pts.shape[0]]
+            
+            points_iou_list.append(pts)
+            occ_tgt_list.append(occ)
+
+        all_points_t = torch.tensor(np.stack(points_iou_list), dtype=torch.float, device=device).transpose(1, 2)
+        all_occ_t = torch.tensor(np.stack(occ_tgt_list), dtype=torch.bool, device=device)
+
+        with torch.no_grad():
+            sdfs = superq.sdf_batch(all_points_t) # (B, N, M)
+            mask = superq.exist_mask.unsqueeze(-1).expand_as(sdfs)
+            sdfs[~mask] = float('inf')
+            min_sdf, _ = torch.min(sdfs, dim=1) # (B, M)
+            pred_occ = (min_sdf <= 0)
+        
+        intersection = (pred_occ & all_occ_t).sum(dim=1).float()
+        union = (pred_occ | all_occ_t).sum(dim=1).float()
+        batch_ious = (intersection / torch.clamp(union, min=1e-6)).cpu().numpy()
 
         superq.update_handler(compute_meshes=False)
         
@@ -165,24 +202,9 @@ def main():
 
             gt_pc = pred_handler.pc[idx] 
             gt_normal = None
-            
-            points_iou = None
-            occ_tgt = None
-            obj_name = pred_handler.names[idx]
-            points_file = os.path.join(category_path, obj_name, "points.npz")
-
-            if os.path.exists(points_file):
-                try:
-                    points_dict = np.load(points_file)
-                    points_iou = points_dict['points']
-                    occ_tgt = points_dict['occupancies']
-                    if np.issubdtype(occ_tgt.dtype, np.uint8):
-                        occ_tgt = np.unpackbits(occ_tgt)[:points_iou.shape[0]]
-                except Exception as e:
-                    print(f"Failed to load points.npz for {obj_name}: {e}")
-            
             try:
-                out_dict_cur = eval_mesh(mesh, gt_pc, gt_normal, points_iou, occ_tgt)
+                out_dict_cur = eval_mesh(mesh, gt_pc, gt_normal, None, None)
+                out_dict_cur['iou'] = float(batch_ious[b_idx])
             except Exception as e:
                 print(f"Eval mesh failed: {e}")
                 continue
@@ -210,8 +232,9 @@ def main():
             })
 
     # Save results
-    print(f"Saving optimized results to {output_npz}...")
-    pred_handler.save_npz(output_npz)
+    if args.type != "none":
+        print(f"Saving optimized results to {output_npz}...")
+        pred_handler.save_npz(output_npz)
     
     # Save detailed metrics
     metrics_csv = output_npz.replace(".npz", "_metrics.csv")

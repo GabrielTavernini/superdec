@@ -61,11 +61,11 @@ abo:
 trainer:
   save_path: checkpoints
   save_every_n_epochs: 50
-  num_epochs: 1000
-  batch_size: 8
+  num_epochs: 500
+  batch_size: 32
   num_workers: 4
   evaluate_every_n_epochs: 1
-  augmentations: True
+  augmentations: False # trying to get the best possibile results on ABO
 optimizer:
   lr: 4e-4 #1e-4 #1e-4   0.001
   weight_decay: 0 # default
@@ -81,11 +81,11 @@ scheduler:
 
 loss:
   type: original
+  w_sps: 0.1 #0.6 
+  w_ext: 0.01 #0.01 
   
   # Original
   n_samples: 500
-  w_sps: 0.1 #0.6 
-  w_ext: 0.01 #0.01 
   w_cub: 1.0 #1.0 
   w_cd: 1.0
   

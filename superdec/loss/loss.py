@@ -56,16 +56,50 @@ def sampling_from_parametric_space_to_equivalent_points(
 
     return torch.stack([x, y, z], -1), torch.stack([nx, ny, nz], -1)
 
-class SuperDecLoss(nn.Module):
+class BaseLoss(nn.Module):
     def __init__(self, cfg):
         super().__init__()
+        self.w_sps = getattr(cfg, 'w_sps', 0.0)
+        self.w_ext = getattr(cfg, 'w_ext', 0.0)
+
+    def compute_existence_loss(self, assign_matrix, exist):
+        thred = 24
+        loss = nn.BCELoss().cuda()
+        gt = (assign_matrix.sum(1) > thred).to(torch.float32).detach()
+        entropy = loss(exist.squeeze(-1), gt)
+        return entropy
+
+    def get_sparsity_loss(self, assign_matrix):
+        num_points = assign_matrix.shape[1]
+        norm_05 = (assign_matrix.sum(1)/num_points + 0.01).sqrt().mean(1).pow(2)
+        norm_05 = torch.mean(norm_05)
+        return norm_05
+
+    def compute_common_losses(self, out_dict, loss_dict):
+        loss = 0
+        loss_dict['expected_prim_num'] = out_dict['exist'].squeeze(-1).sum(-1).mean().data.detach().item()
+
+        if self.w_ext > 0:
+            exist_loss = self.compute_existence_loss(out_dict['assign_matrix'], out_dict['exist'])
+            loss += self.w_ext * exist_loss
+            loss_dict['exist_loss'] = exist_loss.item()
+
+        if self.w_sps > 0:
+            sparsity_loss = self.get_sparsity_loss(out_dict['assign_matrix'])
+            loss += self.w_sps * sparsity_loss
+            loss_dict['sparsity_loss'] = sparsity_loss.item()
+            
+        return loss
+
+class SuperDecLoss(BaseLoss):
+    def __init__(self, cfg):
+        super().__init__(cfg)
         self._init_buffers()
         self.sampler = EqualDistanceSamplerSQ(n_samples=cfg.n_samples, D_eta=0.05, D_omega=0.05)
         
-        self.w_sps = cfg.w_sps
-        self.w_ext = cfg.w_ext
         self.w_cub = cfg.w_cub
         self.w_cd = cfg.w_cd
+
         
         self.cos_sim_cubes = nn.CosineSimilarity(dim=4, eps=1e-4) 
 
@@ -123,19 +157,6 @@ class SuperDecLoss(nn.Module):
         prim_to_pcl_loss = (prim_to_pcl_loss / (exist.squeeze(-1).sum(dim=-1) + 1e-6)).mean()
 
         return pcl_to_prim_loss, prim_to_pcl_loss
-    
-    def compute_existence_loss(self, assign_matrix, exist):
-        thred = 24
-        loss = nn.BCELoss().cuda()
-        gt = (assign_matrix.sum(1) > thred).to(torch.float32).detach()
-        entropy = loss(exist.squeeze(-1), gt)
-        return entropy
-
-    def get_sparsity_loss(self, assign_matrix):
-        num_points = assign_matrix.shape[1]
-        norm_05 = (assign_matrix.sum(1)/num_points + 0.01).sqrt().mean(1).pow(2)
-        norm_05 = torch.mean(norm_05)
-        return norm_05
 
     def forward(self, batch, out_dict):
         pc, normals = batch['points'].cuda().float(), batch['normals'].cuda().float()
@@ -156,23 +177,14 @@ class SuperDecLoss(nn.Module):
             loss += self.w_cd * cd_loss
             loss_dict['cd_loss'] = cd_loss.item()
 
-        if self.w_ext > 0:
-            exist_loss = self.compute_existence_loss(out_dict['assign_matrix'], out_dict['exist'])
-            loss += self.w_ext * exist_loss
-            loss_dict['exist_loss'] = exist_loss.item()
-
-        if self.w_sps > 0:
-            sparsity_loss = self.get_sparsity_loss(out_dict['assign_matrix'])
-            loss += self.w_sps * sparsity_loss
-            loss_dict['sparsity_loss'] = sparsity_loss.item()
-
-        loss_dict['expected_prim_num'] = out_dict['exist'].squeeze(-1).sum(-1).mean().data.detach().item()
+        loss += self.compute_common_losses(out_dict, loss_dict)
+        
         loss_dict['all'] = loss.item()
         return loss, loss_dict
 
-class ParamLoss(nn.Module):
+class ParamLoss(BaseLoss):
     def __init__(self, cfg):
-        super().__init__()
+        super().__init__(cfg)
         self.w_param = getattr(cfg, 'w_param', 1.0)
 
     def forward(self, batch, out_dict):
@@ -212,13 +224,14 @@ class ParamLoss(nn.Module):
         
         total_loss = self.w_param * loss
         loss_dict['param_loss'] = loss.item()
-        loss_dict['all'] = total_loss.item()
         
+        total_loss += self.compute_common_losses(out_dict, loss_dict)
+        loss_dict['all'] = total_loss.item()
         return total_loss, loss_dict
 
-class IoULoss(nn.Module):
+class IoULoss(BaseLoss):
     def __init__(self, cfg):
-        super().__init__()
+        super().__init__(cfg)
         self.truncation = getattr(cfg, 'truncation', 0.05)
         self.w_iou = getattr(cfg, 'w_iou', 1.0)
         self.w_sdf = getattr(cfg, 'w_sdf', 1.0)
@@ -372,6 +385,7 @@ class IoULoss(nn.Module):
         loss_dict['iou'] = iou.mean().item()
         loss_dict['iou_loss'] = L_iou.item()
 
+        loss += self.compute_common_losses(out_dict, loss_dict)
         loss_dict['all'] = loss.item()
         return loss, loss_dict
 
